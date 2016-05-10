@@ -1,17 +1,17 @@
 /*
-* Copyright 2011, 2014 Range Networks, Inc.
-*
-* This software is distributed under multiple licenses;
-* see the COPYING file in the main directory for licensing
-* information for this specific distribution.
-*
-* This use of this software may be subject to additional restrictions.
-* See the LEGAL file in the main directory for details.
+ * Copyright 2011, 2014 Range Networks, Inc.
+ *
+ * This software is distributed under multiple licenses;
+ * see the COPYING file in the main directory for licensing
+ * information for this specific distribution.
+ *
+ * This use of this software may be subject to additional restrictions.
+ * See the LEGAL file in the main directory for details.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-*/
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ */
 
 #include <list>
 #if RN_UMTS
@@ -35,13 +35,212 @@ using namespace Utils;
 #define CASENAME(x) case x: return #x;
 #define SRB3 3
 
+//to_celcom_biller includes
+//CELCOMBiller
+#ifndef __CURL_CURL_H
+#include <curl/curl.h>
+#endif
+#ifndef SSTREAM
+#include <sstream>
+#endif
+#ifndef _STRING_H_
+#include <string.h>
+#endif
+#ifndef __NETINET_IP_H
+#include <netinet/ip.h>
+#endif
+
+const string URL = "http://127.0.0.1:5000";
 
 namespace SGSN {
 typedef std::list<SgsnInfo*> SgsnInfoList_t;
 static SgsnInfoList_t sSgsnInfoList;
 typedef std::list<GmmInfo*> GmmInfoList_t;
 static GmmInfoList_t sGmmInfoList;
-static Mutex sSgsnListMutex;	// One lock sufficient for all lists maintained by SGSN.
+
+static Mutex sSgsnListMutex; // One lock sufficient for all lists maintained by SGSN.
+
+//CELCOMBiller
+//convert int to string
+#define SSTR( x ) static_cast< std::ostringstream & >( \
+        ( std::ostringstream() << std::dec << x ) ).str()
+
+//CELCOMBiller
+//struct to save the return of the requests
+struct mstring {
+	char *ptr;
+	size_t len;
+};
+
+//CELCOMBiller
+void init_string(struct mstring *s) {
+	s->len = 0;
+	s->ptr = static_cast<char*>(malloc(s->len + 1));
+	if (s->ptr == NULL) {
+		fprintf(stderr, "malloc() failed\n");
+		exit(EXIT_FAILURE);
+	}
+	s->ptr[0] = '\0';
+}
+
+//CELCOMBiller
+//callback function to check if the user has credit
+size_t writefunc(void *ptr, size_t size, size_t nmemb, struct mstring *s) {
+	size_t new_len = s->len + size * nmemb;
+	s->ptr = static_cast<char*>(realloc(s->ptr, new_len + 1));
+	if (s->ptr == NULL) {
+		// fprintf(stderr, "realloc() failed\n");
+		exit(EXIT_FAILURE);
+	}
+	memcpy(s->ptr + s->len, ptr, size * nmemb);
+	s->ptr[new_len] = '\0';
+	s->len = new_len;
+
+	return size * nmemb;
+}
+
+//check if the user has credit
+bool has_credit(string imsi) {
+	CURL *curl;
+	CURLcode res;
+	curl_slist *headers = NULL;
+	struct mstring s;
+	init_string(&s);
+
+	char out[100];
+	char fullurl[50];
+
+	strcpy(out, "{\"imsi\":");
+	strcpy(out, imsi.c_str());
+	strcpy(out, "}");
+
+	strcpy(fullurl, URL.c_str());
+	strcpy(fullurl, "/check_balance");
+
+	headers = curl_slist_append(headers, "Accept: application/json");
+	headers = curl_slist_append(headers, "Content-Type: application/json");
+	headers = curl_slist_append(headers, "charsets: utf-8");
+
+	curl_global_init(CURL_GLOBAL_ALL);
+	curl = curl_easy_init();
+	if (curl) {
+
+		curl_easy_setopt(curl, CURLOPT_URL, fullurl);
+		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, out);
+		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writefunc);
+		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &s);
+
+		res = curl_easy_perform(curl);
+
+		//TODO: handle when the request fail
+		//if (res != CURLE_OK)
+		//	fprintf(stderr, "curl_easy_perform() failed: %s\n",
+		//curl_easy_strerror(res));
+
+		curl_easy_cleanup(curl);
+	}
+	curl_global_cleanup();
+	MGINFO("%d",s.ptr );
+	if (atof(s.ptr) > 0)
+		return true;
+	else
+		return false;
+}
+
+//CELCOMBiller
+//function to send information to celcombiller
+int to_celcom_biller(unsigned char *packet, int len) {
+
+//inicializa variaveis para o request
+	CURL *curl;
+	struct curl_slist *headers = NULL;
+	CURLcode res;
+	char output[100];
+
+	char fullurl[50];
+
+	std::string bits = SSTR(len);
+
+//format the packet
+	struct iphdr *iph = (struct iphdr*) packet;
+
+	GmmInfo *gmm;
+	std::string imsi;
+//ScopedLock lock(sSgsnListMutex);
+	if (sGmmInfoList.empty()) { //check if the list in empty
+		return 1;
+	}
+//char buf[30];
+
+//find the imsi
+	int pdpcnt = 0;
+	MGINFO("saddr:",iph->saddr );
+	MGINFO("daddr:", iph->daddr );
+	RN_FOR_ALL(GmmInfoList_t,sGmmInfoList,gmm){
+		for (unsigned nsapi = 0; nsapi < GmmInfo::sNumPdps; nsapi++) {
+			if (gmm->isNSapiActive(nsapi)) {
+				PdpContext *pdp = gmm->getPdp(nsapi);
+				mg_con_t *mgp; // Temp variable reduces probability of race; the mgp itself is immortal.
+				if (pdp && (mgp=pdp->mgp)) {
+					//if (pdpcnt) {
+					//}
+					if ( (mgp->mg_ip == iph->saddr) || (mgp->mg_ip == iph->daddr) ) {
+						imsi = gmm->mImsi.hexstr();
+						//if the user does not have credit delet his gmm
+						// is it a better thing to do ?
+						MGINFO("IMSI: %d",imsi  );
+						if(!has_credit(imsi)){
+							cliGmmDelete(gmm);
+							return 1;
+						}
+					}
+				}
+				pdpcnt++;
+			}
+		}
+	}
+
+//formata o request
+	strcpy(output, "{\"signal\":\"-\", \"type_\":\"decrease\", \"value\": \"");
+	strcat(output, bits.c_str());
+	strcat(output, "\", \"userId\":");
+	strcat(output, imsi.c_str());
+	strcat(output, "}");
+	MGINFO("request: %d",output  );
+	//set the request url
+	strcpy(fullurl, URL.c_str());
+	strcpy(fullurl, "/api/balance");
+
+	headers = curl_slist_append(headers, "Accept: application/json");
+	headers = curl_slist_append(headers, "Content-Type: application/json");
+	headers = curl_slist_append(headers, "charsets: utf-8");
+//send request
+	curl_global_init(CURL_GLOBAL_ALL);
+	curl = curl_easy_init();
+	if (curl) {
+		curl_easy_setopt(curl, CURLOPT_URL, fullurl); ///TODO: por endereco em melhor lugar
+		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, output);
+		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+		res = curl_easy_perform(curl);
+
+		//TODO: handle when the request fail
+		//if(res != CURLE_OK)
+		//fprintf(stderr, "curl_easy_perform() failed: %s\n",
+
+		curl_easy_strerror(res);
+
+		curl_easy_cleanup(curl);
+
+	}
+	curl_global_cleanup();
+	return 0;
+}
+
+
+
+
 static void dumpGmmInfo();
 #if RN_UMTS
 static void sendAuthenticationRequest(SgsnInfo *si, string IMSI);
@@ -51,66 +250,61 @@ static void sendAuthenticationRequest(SgsnInfo *si, string IMSI);
 static SgsnInfo *sgsnGetSgsnInfoByHandle(uint32_t mshandle, bool create);
 static int getNMO();
 
-bool sgsnDebug()
-{
+bool sgsnDebug() {
 	return (gConfig.getBool("SGSN.Debug") || gConfig.getBool("GPRS.Debug"));
 }
 
-bool enableMultislot()
-{
-	return gConfig.getNum(SQL_MULTISLOTMAXDOWNLINK) > 1 ||
-		gConfig.getNum(SQL_MULTISLOTMAXUPLINK) > 1;
+bool enableMultislot() {
+	return gConfig.getNum(SQL_MULTISLOTMAXDOWNLINK) > 1
+			|| gConfig.getNum(SQL_MULTISLOTMAXUPLINK) > 1;
 }
 
-const char *GmmCause::name(unsigned mt, bool ornull)
-{
+const char *GmmCause::name(unsigned mt, bool ornull) {
 	switch (mt) {
-		CASENAME(IMSI_unknown_in_HLR)
-		CASENAME(Illegal_MS)
-		CASENAME(IMEI_not_accepted)
-		CASENAME(Illegal_ME)
-		CASENAME(GPRS_services_not_allowed)
-		CASENAME(GPRS_services_and_non_GPRS_services_not_allowed)
-		CASENAME(MS_identity_cannot_be_derived_by_the_network)
-		CASENAME(Implicitly_detached)
-		CASENAME(PLMN_not_allowed)
-		CASENAME(Location_Area_not_allowed)
-		CASENAME(Roaming_not_allowed_in_this_location_area)
-		CASENAME(GPRS_services_not_allowed_in_this_PLMN)
-		CASENAME(No_Suitable_Cells_In_Location_Area)
-		CASENAME(MSC_temporarily_not_reachable)
-		CASENAME(Network_failure)
-		CASENAME(MAC_failure)
-		CASENAME(Synch_failure)
-		CASENAME(Congestion)
-		CASENAME(GSM_authentication_unacceptable)
-		CASENAME(Not_authorized_for_this_CSG)
-		CASENAME(No_PDP_context_activated)
+	CASENAME(IMSI_unknown_in_HLR)
+	CASENAME(Illegal_MS)
+	CASENAME(IMEI_not_accepted)
+	CASENAME(Illegal_ME)
+	CASENAME(GPRS_services_not_allowed)
+	CASENAME(GPRS_services_and_non_GPRS_services_not_allowed)
+	CASENAME(MS_identity_cannot_be_derived_by_the_network)
+	CASENAME(Implicitly_detached)
+	CASENAME(PLMN_not_allowed)
+	CASENAME(Location_Area_not_allowed)
+	CASENAME(Roaming_not_allowed_in_this_location_area)
+	CASENAME(GPRS_services_not_allowed_in_this_PLMN)
+	CASENAME(No_Suitable_Cells_In_Location_Area)
+	CASENAME(MSC_temporarily_not_reachable)
+	CASENAME(Network_failure)
+	CASENAME(MAC_failure)
+	CASENAME(Synch_failure)
+	CASENAME(Congestion)
+	CASENAME(GSM_authentication_unacceptable)
+	CASENAME(Not_authorized_for_this_CSG)
+	CASENAME(No_PDP_context_activated)
 		// 0x30 to 0x3f - retry upon entry into a new cell?
-		CASENAME(Semantically_incorrect_message)
-		CASENAME(Invalid_mandatory_information)
-		CASENAME(Message_type_nonexistent_or_not_implemented)
-		CASENAME(Message_type_not_compatible_with_the_protocol_state)
-		CASENAME(Information_element_nonexistent_or_not_implemented)
-		CASENAME(Conditional_IE_error)
-		CASENAME(Message_not_compatible_with_the_protocol_state)
-		CASENAME(Protocol_error_unspecified)
-		default:
-			return ornull ? 0 : "unrecognized GmmCause type";
+	CASENAME(Semantically_incorrect_message)
+	CASENAME(Invalid_mandatory_information)
+	CASENAME(Message_type_nonexistent_or_not_implemented)
+	CASENAME(Message_type_not_compatible_with_the_protocol_state)
+	CASENAME(Information_element_nonexistent_or_not_implemented)
+	CASENAME(Conditional_IE_error)
+	CASENAME(Message_not_compatible_with_the_protocol_state)
+	CASENAME(Protocol_error_unspecified)
+	default:
+		return ornull ? 0 : "unrecognized GmmCause type";
 	}
 }
 
 SgsnInfo::SgsnInfo(uint32_t wMsHandle) :
-	//mState(GmmState::GmmNotOurTlli),
-	mGmmp(0),
-	mLlcEngine(0),
-	mMsHandle(wMsHandle),
-	mT3310FinishAttach(15000),	// 15 seconds
-	mT3370ImsiRequest(6000)		// 6 seconds
-	// mSuspended(0),
+		//mState(GmmState::GmmNotOurTlli),
+		mGmmp(0), mLlcEngine(0), mMsHandle(wMsHandle), mT3310FinishAttach(
+				15000),	// 15 seconds
+		mT3370ImsiRequest(6000)		// 6 seconds
+// mSuspended(0),
 {
-	//memset(mOldMcc,0,sizeof(mOldMcc));
-	//memset(mOldMnc,0,sizeof(mOldMnc));
+//memset(mOldMcc,0,sizeof(mOldMcc));
+//memset(mOldMnc,0,sizeof(mOldMnc));
 	time(&mLastUseTime);
 #if RN_UMTS == 0
 	mLlcEngine = new LlcEngine(this);
@@ -118,15 +312,15 @@ SgsnInfo::SgsnInfo(uint32_t wMsHandle) :
 	sSgsnInfoList.push_back(this);
 }
 
-SgsnInfo::~SgsnInfo()
-{
-	if (mLlcEngine) {delete mLlcEngine;}
+SgsnInfo::~SgsnInfo() {
+	if (mLlcEngine) {
+		delete mLlcEngine;
+	}
 }
 
-void SgsnInfo::sirm()
-{
+void SgsnInfo::sirm() {
 	std::ostringstream ss;
-	sgsnInfoDump(this,ss);
+	sgsnInfoDump(this, ss);
 	SGSNLOG("Removing SgsnInfo:"<<ss);
 	sSgsnInfoList.remove(this);
 	delete this;
@@ -134,8 +328,7 @@ void SgsnInfo::sirm()
 
 // This is for use by the Command Line Interface
 // Return true on success.
-bool cliSgsnInfoDelete(SgsnInfo *si)
-{
+bool cliSgsnInfoDelete(SgsnInfo *si) {
 	ScopedLock lock(sSgsnListMutex);
 	GmmInfo *gmm = si->getGmm();
 	if (gmm && gmm->getSI() == si) {
@@ -149,8 +342,7 @@ bool cliSgsnInfoDelete(SgsnInfo *si)
 // This is the generalized printer to identify an SgsnInfo.
 // The alternate sgsnInfoDump is used only for gmmDump and prints
 // only that info that is not duplicated in the Gmm.
-std::ostream& operator<<(std::ostream& os, const SgsnInfo*si)
-{
+std::ostream& operator<<(std::ostream& os, const SgsnInfo*si) {
 	MSUEAdapter *ms = si->getMS();
 	if (ms) {
 		os << ms->msid();
@@ -161,15 +353,18 @@ std::ostream& operator<<(std::ostream& os, const SgsnInfo*si)
 		os << LOGHEX2("TLLI", si->mMsHandle);
 #endif
 	}
-	if (si->getGmm()) { os << LOGVAR2("imsi",si->getGmm()->mImsi.hexstr()); }
+	if (si->getGmm()) {
+		os << LOGVAR2("imsi", si->getGmm()->mImsi.hexstr());
+	}
 	return os;
 }
 
 // Reset this connection, for example, because it is doing a GmmDetach or a new GmmAttach.
-void SgsnInfo::sgsnReset()
-{
+void SgsnInfo::sgsnReset() {
 	freePdpAll(true);
-	if (mLlcEngine) { mLlcEngine->getLlcGmm()->reset(); }
+	if (mLlcEngine) {
+		mLlcEngine->getLlcGmm()->reset();
+	}
 }
 
 // The operator is allowed to choose the P-TMSI allocation strategy, subject to the constraints
@@ -180,143 +375,139 @@ void SgsnInfo::sgsnReset()
 // For UMTS, the URNTI consists of a 20-bit (really 16-bit, because it must fit in that) UE id
 // plus a 12 bit SRNC id.
 static uint32_t gPTmsiNext = 0;
-static uint32_t allocatePTmsi()
-{
+static uint32_t allocatePTmsi() {
 	if (gPTmsiNext == 0) {
 		// Add in the time to the starting TMSI so if the BTS is restarted there is a better chance
 		// of not using the same tmsis over again.
 		time_t now;
 		time(&now);
-		gPTmsiNext = ((now&0xff)<<12) + 1;
+		gPTmsiNext = ((now & 0xff) << 12) + 1;
 	}
-	if (gPTmsiNext == 0 || gPTmsiNext >= (1<<30)) { gPTmsiNext = 1; }
+	if (gPTmsiNext == 0 || gPTmsiNext >= (1 << 30)) {
+		gPTmsiNext = 1;
+	}
 	return gPTmsiNext++;
-	//return Tlli::makeLocalTlli(gPTmsiNext++);
+//return Tlli::makeLocalTlli(gPTmsiNext++);
 }
 
-MSUEAdapter *SgsnInfo::getMS() const
-{
-	// The MSInfo struct disappears after a period of time, so look it up.
-	//return GPRS::gL2MAC.macFindMSByTLLI(mMsHandle,0);
+MSUEAdapter *SgsnInfo::getMS() const {
+// The MSInfo struct disappears after a period of time, so look it up.
+//return GPRS::gL2MAC.macFindMSByTLLI(mMsHandle,0);
 	return SgsnAdapter::findMs(mMsHandle);
 }
 
-GmmInfo::GmmInfo(ByteVector &imsi):
-	mImsi(imsi), mState(GmmState::GmmDeregistered), msi(0)
-{
-	memset(mPdps,0,sizeof(mPdps));
+GmmInfo::GmmInfo(ByteVector &imsi) :
+		mImsi(imsi), mState(GmmState::GmmDeregistered), msi(0) {
+	memset(mPdps, 0, sizeof(mPdps));
 	mPTmsi = allocatePTmsi();
 	mGprsMultislotClass = -1;		// -1 means invalid.
 	mAttachTime = 0;
-	// Must set activityTime to prevent immediate removal from list by another phone simultaneously connection.
+// Must set activityTime to prevent immediate removal from list by another phone simultaneously connection.
 	setActivity();
 	ScopedLock lock(sSgsnListMutex);
 	sGmmInfoList.push_back(this);
 }
 
-GmmInfo::~GmmInfo()
-{
+GmmInfo::~GmmInfo() {
 	freePdpAll(true);
 }
 
 // Assumes sSgsnListMutex is locked on entry.
-static void GmmRemove(GmmInfo *gmm)
-{
+static void GmmRemove(GmmInfo *gmm) {
 	std::ostringstream ss;
-	gmmInfoDump(gmm,ss,0);
+	gmmInfoDump(gmm, ss, 0);
 	SGSNLOG("Removing gmm:"<<ss);
 	SgsnInfo *si;
-	RN_FOR_ALL(SgsnInfoList_t,sSgsnInfoList,si) {
-		// The second test here should be redundant.
-		if (si->getGmm() == gmm || gmm->getSI() == si) {
-			si->sirm();	// yes this is suboptimal, but list is short
-		}
+	RN_FOR_ALL(SgsnInfoList_t,sSgsnInfoList,si){
+// The second test here should be redundant.
+	if (si->getGmm() == gmm || gmm->getSI() == si) {
+		si->sirm();	// yes this is suboptimal, but list is short
 	}
+}
 #if 0
-	for (SgsnInfoList_t::iterator itr = sSgsnInfoList.begin(); itr != sSgsnInfoList.end(); ) {
-		SgsnInfo *si = *itr;
-		if (si->getGmm() == gmm) {
-			itr = sSgsnInfoList.erase(itr);
-			delete si;
-		} else {
-			itr++;
-		}
+for (SgsnInfoList_t::iterator itr = sSgsnInfoList.begin(); itr != sSgsnInfoList.end(); ) {
+	SgsnInfo *si = *itr;
+	if (si->getGmm() == gmm) {
+		itr = sSgsnInfoList.erase(itr);
+		delete si;
+	} else {
+		itr++;
 	}
+}
 #endif
 	sGmmInfoList.remove(gmm);
 	delete gmm;
 }
 
-
 // This is for use by the Command Line Interface
-void cliGmmDelete(GmmInfo *gmm)
-{
+void cliGmmDelete(GmmInfo *gmm) {
 	ScopedLock lock(sSgsnListMutex);
 	GmmRemove(gmm);
 }
 
-PdpContext *GmmInfo::getPdp(unsigned nsapi)
-{
-	//return mSndcp[nsapi] ? mSndcp[nsapi]->mPdp : 0;
+PdpContext *GmmInfo::getPdp(unsigned nsapi) {
+//return mSndcp[nsapi] ? mSndcp[nsapi]->mPdp : 0;
 	assert(nsapi < sNumPdps);
 	setActivity();
 	return mPdps[nsapi];
 }
 
 // True if the pdpcontext is not in state PDP-INACTIVE
-bool GmmInfo::isNSapiActive(unsigned nsapi)
-{
+bool GmmInfo::isNSapiActive(unsigned nsapi) {
 	assert(nsapi < sNumPdps);
 	return !(mPdps[nsapi] == 0 || mPdps[nsapi]->isPdpInactive());
 }
 
 // This status is sent back to the MS in messages to indicate what the Network thinks
 // what PDPContexts are currently in use.
-PdpContextStatus GmmInfo::getPdpContextStatus()
-{
+PdpContextStatus GmmInfo::getPdpContextStatus() {
 	PdpContextStatus result;
 	for (int i = 0; i <= 7; i++) {
-		if (isNSapiActive(i)) { result.mStatus[0] |= (1<<i); }
-		if (isNSapiActive(i+8)) { result.mStatus[1] |= (1<<i); }
+		if (isNSapiActive(i)) {
+			result.mStatus[0] |= (1 << i);
+		}
+		if (isNSapiActive(i + 8)) {
+			result.mStatus[1] |= (1 << i);
+		}
 	}
 	return result;
 }
 
-void GmmInfo::connectPdp(PdpContext *pdp, mg_con_t *mgp)
-{
-	// Order may be important here.
-	// We dont want to hook the mgp up until the stack is all connected and prepared
-	// to receive packets, because they could come blasting in any time,
-	// even before any outgoing packets are sent.
-	assert(pdp->mNSapi >= 0 && pdp->mNSapi < (int)sNumPdps);
+void GmmInfo::connectPdp(PdpContext *pdp, mg_con_t *mgp) {
+// Order may be important here.
+// We dont want to hook the mgp up until the stack is all connected and prepared
+// to receive packets, because they could come blasting in any time,
+// even before any outgoing packets are sent.
+	assert(pdp->mNSapi >= 0 && pdp->mNSapi < (int )sNumPdps);
 	mPdps[pdp->mNSapi] = pdp;
-	// getSI() should never NULL.  The mLlcEngine is null in umts.
+// getSI() should never NULL.  The mLlcEngine is null in umts.
 	SgsnInfo *si = getSI();
 	assert(si);
-	if (si->mLlcEngine) { si->mLlcEngine->allocSndcp(si,pdp->mNSapi,pdp->mLlcSapi); }
-	mg_con_open(mgp,pdp);
+	if (si->mLlcEngine) {
+		si->mLlcEngine->allocSndcp(si, pdp->mNSapi, pdp->mLlcSapi);
+	}
+	mg_con_open(mgp, pdp);
 }
 
 // Return TRUE if the pdp was allocated.
-bool GmmInfo::freePdp(unsigned nsapi)
-{
+bool GmmInfo::freePdp(unsigned nsapi) {
 	assert(nsapi < sNumPdps);
 	PdpContext *pdp = mPdps[nsapi];
 	mPdps[nsapi] = 0;
-	if (pdp) delete pdp;	// This disconnects the mgp also.
-	// getSI() should never be NULL.  The mLlcEngine is null in umts.
+	if (pdp)
+		delete pdp;	// This disconnects the mgp also.
+// getSI() should never be NULL.  The mLlcEngine is null in umts.
 #if SNDCP_IN_PDP
-	// sndcp is in the PdpContext and deleted automatically.
-	// Do we want to reset the LLC Sapi?  Doubt it because it is shared.
+// sndcp is in the PdpContext and deleted automatically.
+// Do we want to reset the LLC Sapi?  Doubt it because it is shared.
 #else
 	LlcEngine *llc = getSI() ? getSI()->mLlcEngine : NULL;
-	if (llc) { llc->freeSndcp(nsapi); }
+	if (llc) {llc->freeSndcp(nsapi);}
 #endif
 	return !!pdp;
 }
 
-void SgsnInfo::deactivateRabs(unsigned nsapiMask)
-{
+void SgsnInfo::deactivateRabs(unsigned nsapiMask) {
 #if RN_UMTS
 	MSUEAdapter *ms = getMS();
 	if (ms) {
@@ -328,94 +519,102 @@ void SgsnInfo::deactivateRabs(unsigned nsapiMask)
 }
 
 // Return a mask of RABs that were freed.
-unsigned GmmInfo::freePdpAll(bool freeRabsToo)
-{
+unsigned GmmInfo::freePdpAll(bool freeRabsToo) {
 	unsigned rabMask = 0;
 	for (unsigned nsapi = 0; nsapi < sNumPdps; nsapi++) {
-		if (freePdp(nsapi)) { rabMask |= 1<<nsapi; }
+		if (freePdp(nsapi)) {
+			rabMask |= 1 << nsapi;
+		}
 	}
 	if (freeRabsToo && rabMask) {
 		// It would be a serious internal error for getSI() to fail, but check anyway.
-		if (getSI()) { getSI()->deactivateRabs(rabMask); }
+		if (getSI()) {
+			getSI()->deactivateRabs(rabMask);
+		}
 	}
-	if (rabMask) addShellRequest("PdpDeactivateAll",this);
+	if (rabMask)
+		addShellRequest("PdpDeactivateAll", this);
 	return rabMask;
 }
 
-void SgsnInfo::sgsnSend2PdpLowSide(int nsapi, ByteVector &packet)
-{
+void SgsnInfo::sgsnSend2PdpLowSide(int nsapi, ByteVector &packet) {
 	PdpContext *pdp = getPdp(nsapi);
 	assert(pdp);
 	pdp->pdpWriteLowSide(packet);
 }
 
 // The rbid is not used by GPRS, and is just 0.
-void SgsnInfo::sgsnSend2MsHighSide(ByteVector &pdu,const char *descr, int rbid)
-{
-		MSUEAdapter *ms = getMS();
+void SgsnInfo::sgsnSend2MsHighSide(ByteVector &pdu, const char *descr,
+		int rbid) {
+	MSUEAdapter *ms = getMS();
 #if RN_UMTS
-		// TODO: It would be safer not to call getMS, but just send the dlpdu through
-		// an InterthreadQueue and let the UMTS or GPRS L2 handle that part in its own thread.
-		// In that case we have to add oldTlli to the message also.
-		if (!ms) {
-			SGSNWARN("no corresponding MS for URNTI " << mMsHandle);
-			return;
-		}
-		// For UMTS we pass the rbid which is an intrinsic part of this channel.
-		// TODO: Update UMTS to use DownlinkPdu too.
-		ms->msWriteHighSide(pdu,rbid,descr);
+// TODO: It would be safer not to call getMS, but just send the dlpdu through
+// an InterthreadQueue and let the UMTS or GPRS L2 handle that part in its own thread.
+// In that case we have to add oldTlli to the message also.
+	if (!ms) {
+		SGSNWARN("no corresponding MS for URNTI " << mMsHandle);
+		return;
+	}
+// For UMTS we pass the rbid which is an intrinsic part of this channel.
+// TODO: Update UMTS to use DownlinkPdu too.
+	ms->msWriteHighSide(pdu,rbid,descr);
 #else
-		GmmInfo *gmm = getGmm();
-		uint32_t tlli, aliasTlli = 0;
-		if (gmm && gmm->isRegistered()) {
-			tlli = gmm->getTlli();	// The TLLI based on the assigned P-TMSI.
-		} else {
-			// We send the message using the TLLI of the SgsnInfo,
-			// which is the one the MS used to talk to us.
-			tlli = mMsHandle;
-			// If we know the P-TMSI that will be used for the local TLLI
-			// for this MS after the attach procedure, notify L2.
-			if (gmm) { aliasTlli = gmm->getTlli(); }
-			if (aliasTlli == tlli) { aliasTlli = 0; }	// Be tidy; but dont think this can happen.
+	GmmInfo *gmm = getGmm();
+	uint32_t tlli, aliasTlli = 0;
+	if (gmm && gmm->isRegistered()) {
+		tlli = gmm->getTlli();	// The TLLI based on the assigned P-TMSI.
+	} else {
+		// We send the message using the TLLI of the SgsnInfo,
+		// which is the one the MS used to talk to us.
+		tlli = mMsHandle;
+		// If we know the P-TMSI that will be used for the local TLLI
+		// for this MS after the attach procedure, notify L2.
+		if (gmm) {
+			aliasTlli = gmm->getTlli();
 		}
-		if (!ms) {
-			LOG(WARNING) << "no corresponding MS for TLLI " << mMsHandle;
-			return;
-		}
-		GprsSgsnDownlinkPdu *dlpdu = new GprsSgsnDownlinkPdu(pdu,tlli,aliasTlli,descr);
-		//ms->msWriteHighSide(dlpdu);
-		// This is thread safe:
-		// Go ahead and enqueue it even if there is no MS
-		SgsnAdapter::saWriteHighSide(dlpdu);
+		if (aliasTlli == tlli) {
+			aliasTlli = 0;
+		}	// Be tidy; but dont think this can happen.
+	}
+	if (!ms) {
+		LOG(WARNING) << "no corresponding MS for TLLI " << mMsHandle;
+		return;
+	}
+	GprsSgsnDownlinkPdu *dlpdu = new GprsSgsnDownlinkPdu(pdu, tlli, aliasTlli,
+			descr);
+//ms->msWriteHighSide(dlpdu);
+// This is thread safe:
+// Go ahead and enqueue it even if there is no MS
+	SgsnAdapter::saWriteHighSide(dlpdu);
 #endif
 }
 
-void SgsnInfo::sgsnWriteHighSideMsg(L3GprsDlMsg &msg)
-{
+void SgsnInfo::sgsnWriteHighSideMsg(L3GprsDlMsg &msg) {
 #if RN_UMTS
-		// bypass llc
-		ByteVector bv(1000);
-		bv.setAppendP(0,0);
-		msg.gWrite(bv);
-		SGSNLOG("Sending "<<msg.str() <<this);
-		sgsnSend2MsHighSide(bv,msg.mtname(),SRB3);	// TODO: Is SRB3 correct?
+// bypass llc
+	ByteVector bv(1000);
+	bv.setAppendP(0,0);
+	msg.gWrite(bv);
+	SGSNLOG("Sending "<<msg.str() <<this);
+	sgsnSend2MsHighSide(bv,msg.mtname(),SRB3);// TODO: Is SRB3 correct?
 #else
-		LlcDlFrame lframe(1000);
-		lframe.setAppendP(0,0);
-		msg.gWrite(lframe);
-		SGSNLOG("Sending "<<msg.str() <<this<<" frame(first20)="<<lframe.head(MIN(20,lframe.size())));
-		mLlcEngine->getLlcGmm()->lleWriteHighSide(lframe,msg.isSenseCmd(),msg.mtname());
+	LlcDlFrame lframe(1000);
+	lframe.setAppendP(0, 0);
+	msg.gWrite(lframe);
+	SGSNLOG(
+			"Sending "<<msg.str() <<this<<" frame(first20)="<<lframe.head(MIN(20,lframe.size())));
+	mLlcEngine->getLlcGmm()->lleWriteHighSide(lframe, msg.isSenseCmd(),
+			msg.mtname());
 #endif
 }
 
 // Incoming packets on a PdpContext come here.
-void SgsnInfo::sgsnWriteHighSide(ByteVector &sdu,int nsapi)
-{
+void SgsnInfo::sgsnWriteHighSide(ByteVector &sdu, int nsapi) {
 #if RN_UMTS
-		// The PDCP is a complete no-op.
-		sgsnSend2MsHighSide(sdu,"userdata",nsapi);
+// The PDCP is a complete no-op.
+	sgsnSend2MsHighSide(sdu,"userdata",nsapi);
 #else
-		mLlcEngine->llcWriteHighSide(sdu,nsapi);
+	mLlcEngine->llcWriteHighSide(sdu, nsapi);
 #endif
 }
 
@@ -442,69 +641,66 @@ void SgsnInfo::sgsnWriteHighSide(ByteVector &sdu,int nsapi)
 //};
 
 // Return Network Mode of Operation 1,2,3
-static int getNMO()
-{
+static int getNMO() {
 	return gConfig.getNum("GPRS.NMO");
 }
 
-void sendAttachAccept(SgsnInfo *si)
-{
+void sendAttachAccept(SgsnInfo *si) {
 	si->mT3310FinishAttach.reset();
 	GmmInfo *gmm = si->getGmm();
 	assert(gmm);
-	//L3GmmMsgAttachAccept aa(si->attachResult(),gmm->getPTmsi(),si->mAttachMobileId);
+//L3GmmMsgAttachAccept aa(si->attachResult(),gmm->getPTmsi(),si->mAttachMobileId);
 	uint32_t ptmsi = gmm->getPTmsi();
-	L3GmmMsgAttachAccept aa(si->attachResult(),ptmsi);
-	// We are finished with the attach procedure now.
-	// Note that we are using the si (and TLLI) that the message was sent on.
-	// If the BTS and the MS disagreed on the attach state at the start of this procedure,
-	// we reset the MS registration to match what the MS thinks to make sure we will
-	// use the old TLLI in the si, not the new one based on the PTMSI.
+	L3GmmMsgAttachAccept aa(si->attachResult(), ptmsi);
+// We are finished with the attach procedure now.
+// Note that we are using the si (and TLLI) that the message was sent on.
+// If the BTS and the MS disagreed on the attach state at the start of this procedure,
+// we reset the MS registration to match what the MS thinks to make sure we will
+// use the old TLLI in the si, not the new one based on the PTMSI.
 	si->sgsnWriteHighSideMsg(aa);
 }
 
-static void handleAttachStep(SgsnInfo *si)
-{
+static void handleAttachStep(SgsnInfo *si) {
 	GmmInfo *gmm = si->getGmm();
 	if (!gmm) {	// This cannot happen.
 		SGSNERROR("No imsi found for MS during Attach procedure"<<si);
 		return;
 	}
 #if RN_UMTS
-		// Must do the Security Proecedure first, message flow like this:
-		//      L3 AttachRequest
-		// MS ---------------------------------> Network
-		//      RRC SecurityModeCommand
-		// MS <--------------------------------- Network
-		//      RRC SecurityModeComplete
-		// MS ---------------------------------> Network
-		//     L3 AttachAccept
-		// MS <--------------------------------- Network
-		// (pat) Update: Havind added the authentication for NMO I in here,
-		// so the above procedure is now moved to 
+// Must do the Security Proecedure first, message flow like this:
+//      L3 AttachRequest
+// MS ---------------------------------> Network
+//      RRC SecurityModeCommand
+// MS <--------------------------------- Network
+//      RRC SecurityModeComplete
+// MS ---------------------------------> Network
+//     L3 AttachAccept
+// MS <--------------------------------- Network
+// (pat) Update: Havind added the authentication for NMO I in here,
+// so the above procedure is now moved to
 
-		// If we are in NMO 2, authentication was allegedly already done by
-		// the Mobility Management protocol layer, in which case there is
-		// a Kc sitting in the TMSI table.
-		// We need to pass it a nul-terminated IMSI string.
-		string IMSI = gmm->mImsi.hexstr();
-		//int len = gmm->mImsi.size();
-		//char imsi[len+2];
-		//memcpy(imsi,gmm->mImsi.hexstr().c_str(),len);
-		//imsi[len] = 0;
-		LOG(INFO) << "Looking up Kc for imsi " << IMSI;
-		string Kcs = gTMSITable.getKc(IMSI.c_str());
-		if (Kcs.length() <= 1) {
-			SGSNERROR("No Kc found for MS in TMSI table during Attach procedure"<<si);
-			// need to do authentication, send authentication request
-                        //sendAuthenticationRequest(si);
-		}
-		sendAuthenticationRequest(si,IMSI);
+// If we are in NMO 2, authentication was allegedly already done by
+// the Mobility Management protocol layer, in which case there is
+// a Kc sitting in the TMSI table.
+// We need to pass it a nul-terminated IMSI string.
+	string IMSI = gmm->mImsi.hexstr();
+//int len = gmm->mImsi.size();
+//char imsi[len+2];
+//memcpy(imsi,gmm->mImsi.hexstr().c_str(),len);
+//imsi[len] = 0;
+	LOG(INFO) << "Looking up Kc for imsi " << IMSI;
+	string Kcs = gTMSITable.getKc(IMSI.c_str());
+	if (Kcs.length() <= 1) {
+		SGSNERROR("No Kc found for MS in TMSI table during Attach procedure"<<si);
+		// need to do authentication, send authentication request
+		//sendAuthenticationRequest(si);
+	}
+	sendAuthenticationRequest(si,IMSI);
 #else
-		// We must use the TLLI that the MS used, not the PTMSI.
-		// To do that, reset the registered status.
-		gmm->setGmmState(GmmState::GmmDeregistered);
-		sendAttachAccept(si);
+// We must use the TLLI that the MS used, not the PTMSI.
+// To do that, reset the registered status.
+	gmm->setGmmState(GmmState::GmmDeregistered);
+	sendAttachAccept(si);
 #endif
 }
 
@@ -513,7 +709,7 @@ static void handleAttachStep(SgsnInfo *si)
 void MSUEAdapter::sgsnHandleSecurityModeComplete(bool success)
 {
 	SgsnInfo *si = sgsnGetSgsnInfo();
-	// The si would only be null if the UE sent us a spurious SecurityModeComplete command.
+// The si would only be null if the UE sent us a spurious SecurityModeComplete command.
 	if (si == NULL) {
 		SGSNERROR("Received spurious SecurityMode completion command for UE:"<<msid());
 		return;
@@ -536,80 +732,81 @@ void MSUEAdapter::sgsnHandleSecurityModeComplete(bool success)
 #if RN_UMTS
 static void sendAuthenticationRequest(SgsnInfo *si, string IMSI)
 {
-        SIPEngine engine(gConfig.getStr("SIP.Proxy.Registration").c_str(),IMSI.c_str());
+	SIPEngine engine(gConfig.getStr("SIP.Proxy.Registration").c_str(),IMSI.c_str());
 	string RAND;
-        //bool success =
-		engine.Register(SIPEngine::SIPRegister, &RAND);
-	// Stick new UE into TMSI table if its not already there
+//bool success =
+	engine.Register(SIPEngine::SIPRegister, &RAND);
+// Stick new UE into TMSI table if its not already there
 	if (!gTMSITable.TMSI(IMSI.c_str())) gTMSITable.assign(IMSI.c_str());
 
-        ByteVector rand(RAND.size()/2);    // Leave it random.
+	ByteVector rand(RAND.size()/2);// Leave it random.
 	for (unsigned i = 0; i < RAND.size(); i++) {
 		char ch = (RAND.c_str())[i];
 		ch = (ch > '9') ? ((ch & 0x0f) + 9) : (ch & 0x0f);
 		rand.setField(i*4,ch,4);
 	}
-        L3GmmMsgAuthentication amsg(rand);
-        si->sgsnWriteHighSideMsg(amsg);
+	L3GmmMsgAuthentication amsg(rand);
+	si->sgsnWriteHighSideMsg(amsg);
 	si->mRAND = rand;
 }
 #endif
 
-static void handleAuthenticationResponse(SgsnInfo *si, L3GmmMsgAuthenticationResponse &armsg) 
-{
+static void handleAuthenticationResponse(SgsnInfo *si,
+		L3GmmMsgAuthenticationResponse &armsg) {
 #if RN_UMTS
 	if (Sgsn::isUmts()) {
-                GmmInfo *gmm = si->getGmm();
-                if (!gmm) {
-                        SGSNERROR("No imsi found for MS during Attach procedure"<<si);
-                        return;
-                }
+		GmmInfo *gmm = si->getGmm();
+		if (!gmm) {
+			SGSNERROR("No imsi found for MS during Attach procedure"<<si);
+			return;
+		}
 
-                string IMSI = gmm->mImsi.hexstr();
+		string IMSI = gmm->mImsi.hexstr();
 		string RAND = si->mRAND.hexstr();
-                // verify SRES 
+		// verify SRES
 		bool success = false;
-                try {
-                        SIPEngine engine(gConfig.getStr("SIP.Proxy.Registration").c_str(),IMSI.c_str());
-                        SGSNLOG("waiting for registration on IMSI: " << IMSI);
-                        string SRESstr = armsg.mSRES.hexstr();
-                        success = engine.Register(SIPEngine::SIPRegister, &RAND, IMSI.c_str(), SRESstr.c_str());
-                }
-                catch(SIPTimeout) {
-                        SGSNLOG("SIP authentication timed out.  Is the proxy running at " << gConfig.getStr("SIP.Proxy.Registration"));
-                        // TODO: Reject 
-                        return;
-                }
+		try {
+			SIPEngine engine(gConfig.getStr("SIP.Proxy.Registration").c_str(),IMSI.c_str());
+			SGSNLOG("waiting for registration on IMSI: " << IMSI);
+			string SRESstr = armsg.mSRES.hexstr();
+			success = engine.Register(SIPEngine::SIPRegister, &RAND, IMSI.c_str(), SRESstr.c_str());
+		}
+		catch(SIPTimeout) {
+			SGSNLOG("SIP authentication timed out.  Is the proxy running at " << gConfig.getStr("SIP.Proxy.Registration"));
+			// TODO: Reject
+			return;
+		}
 
 		if (!success) return;
 
-                LOG(INFO) << "Looking up Kc for imsi " << IMSI;
-                string Kcs = gTMSITable.getKc(IMSI.c_str());
-                if (Kcs.length() <= 1) {
-                        SGSNERROR("No Kc found for MS in TMSI table during Attach procedure"<<si);
-                        // need to do authentication, send authentication request
-                        //sendAuthenticationRequest(si);
-                }
+		LOG(INFO) << "Looking up Kc for imsi " << IMSI;
+		string Kcs = gTMSITable.getKc(IMSI.c_str());
+		if (Kcs.length() <= 1) {
+			SGSNERROR("No Kc found for MS in TMSI table during Attach procedure"<<si);
+			// need to do authentication, send authentication request
+			//sendAuthenticationRequest(si);
+		}
 
-                SgsnAdapter::startIntegrityProtection(si->mMsHandle,Kcs);
+		SgsnAdapter::startIntegrityProtection(si->mMsHandle,Kcs);
 	}
 #endif
 }
 
-static void handleIdentityResponse(SgsnInfo *si, L3GmmMsgIdentityResponse &irmsg)
-{
-	if (! si->mT3310FinishAttach.active()) {
+static void handleIdentityResponse(SgsnInfo *si,
+		L3GmmMsgIdentityResponse &irmsg) {
+	if (!si->mT3310FinishAttach.active()) {
 		// Well that is interesting.  We got a spurious identity response.
 		SGSNERROR("unexpected message:"<<irmsg.str());
 		return;
 	} else {
 		// The MS sent an attach request.  Try to send the response using the new IMSI.
-		if (! irmsg.mMobileId.isImsi()) {
-			SGSNERROR("Identity Response message does not include imsi:"<<irmsg.str());
+		if (!irmsg.mMobileId.isImsi()) {
+			SGSNERROR(
+					"Identity Response message does not include imsi:"<<irmsg.str());
 			return;
 		}
-		ByteVector passbyreftmp = irmsg.mMobileId.getImsi();		// c++ foo bar
-		findGmmByImsi(passbyreftmp,si);	// Always succeeds - creates if necessary, sets si->mGmmp.
+		ByteVector passbyreftmp = irmsg.mMobileId.getImsi();	// c++ foo bar
+		findGmmByImsi(passbyreftmp, si);// Always succeeds - creates if necessary, sets si->mGmmp.
 
 		// Use the imsi as the mobileId in the AttachAccept.
 		//si->mAttachMobileId = irmsg.mMobileId;
@@ -623,22 +820,23 @@ static void handleIdentityResponse(SgsnInfo *si, L3GmmMsgIdentityResponse &irmsg
 	}
 }
 
-void AttachInfo::stashMsgInfo(GMMAttach &msgIEs,
-	bool isAttach)	// true: attach request; false: RAUpdate
-{
-	// Save the MCC and MNC from which the MS drifted in on for reporting.
-	// We only save them the first time we see them, because I am afraid
-	// after that they will revert to our own MCC and MNC.
-	if (! mPrevRaId.valid()) { mPrevRaId = msgIEs.mOldRaId; }
+void AttachInfo::stashMsgInfo(GMMAttach &msgIEs, bool isAttach)	// true: attach request; false: RAUpdate
+		{
+// Save the MCC and MNC from which the MS drifted in on for reporting.
+// We only save them the first time we see them, because I am afraid
+// after that they will revert to our own MCC and MNC.
+	if (!mPrevRaId.valid()) {
+		mPrevRaId = msgIEs.mOldRaId;
+	}
 
-	//if (mOldMcc[0] == 0 && mOldMcc[1] == 0) {
-	//	for (int i = 0; i < 3; i++) { mOldMcc[i] = DEHEXIFY(msgIEs.mOldRaId.mMCC[i]); }
-	//}
-	//if (mOldMnc[0] == 0 && mOldMnc[1] == 0) {
-	//	for (int i = 0; i < 3; i++) { mOldMnc[i] = DEHEXIFY(msgIEs.mOldRaId.mMNC[i]); }
-	//}
+//if (mOldMcc[0] == 0 && mOldMcc[1] == 0) {
+//	for (int i = 0; i < 3; i++) { mOldMcc[i] = DEHEXIFY(msgIEs.mOldRaId.mMCC[i]); }
+//}
+//if (mOldMnc[0] == 0 && mOldMnc[1] == 0) {
+//	for (int i = 0; i < 3; i++) { mOldMnc[i] = DEHEXIFY(msgIEs.mOldRaId.mMNC[i]); }
+//}
 
-	// If a PTMSI was specified in the AttachRequest we need to remember it.
+// If a PTMSI was specified in the AttachRequest we need to remember it.
 	if (isAttach && msgIEs.mMobileId.isTmsi()) {
 		mAttachReqPTmsi = msgIEs.mMobileId.getTmsi();
 	}
@@ -646,40 +844,44 @@ void AttachInfo::stashMsgInfo(GMMAttach &msgIEs,
 	if (msgIEs.mMsRadioAccessCapability.size()) {
 		mMsRadioAccessCap = msgIEs.mMsRadioAccessCapability;
 	}
-	//mAttachMobileId = msgIEs.mMobileId;
+//mAttachMobileId = msgIEs.mMobileId;
 }
 
-void AttachInfo::copyFrom(AttachInfo &other)
-{
-	if (! mPrevRaId.valid()) { mPrevRaId = other.mPrevRaId; }
-	if (! mAttachReqPTmsi) { mAttachReqPTmsi = other.mAttachReqPTmsi; }
-	if (! mAttachReqType) { mAttachReqType = other.mAttachReqType; }
+void AttachInfo::copyFrom(AttachInfo &other) {
+	if (!mPrevRaId.valid()) {
+		mPrevRaId = other.mPrevRaId;
+	}
+	if (!mAttachReqPTmsi) {
+		mAttachReqPTmsi = other.mAttachReqPTmsi;
+	}
+	if (!mAttachReqType) {
+		mAttachReqType = other.mAttachReqType;
+	}
 	if (other.mMsRadioAccessCap.size()) {
 		mMsRadioAccessCap = other.mMsRadioAccessCap;
 	}
 }
 
-void sendImplicitlyDetached(SgsnInfo *si)
-{
+void sendImplicitlyDetached(SgsnInfo *si) {
 	L3GmmMsgGmmStatus statusMsg(GmmCause::Implicitly_detached);
 	si->sgsnWriteHighSideMsg(statusMsg);
-	// The above didn't do it, so try sending one of these too:
-	// Detach type 1 means re-attach required.
-	//L3GmmMsgDetachRequest dtr(1,GmmCause::Implicitly_detached);
-	// 7-2012: Tried taking out the cause to stop the Multitech modem
-	// sending 'invalid mandatory information'.
-	// The only reason obvious to send that is in 24.008 8.5 is an unexpected IE,
-	// so maybe it is the cause.  But it did not help.
-	L3GmmMsgDetachRequest dtr(1,0);
+// The above didn't do it, so try sending one of these too:
+// Detach type 1 means re-attach required.
+//L3GmmMsgDetachRequest dtr(1,GmmCause::Implicitly_detached);
+// 7-2012: Tried taking out the cause to stop the Multitech modem
+// sending 'invalid mandatory information'.
+// The only reason obvious to send that is in 24.008 8.5 is an unexpected IE,
+// so maybe it is the cause.  But it did not help.
+	L3GmmMsgDetachRequest dtr(1, 0);
 	si->sgsnWriteHighSideMsg(dtr);
 }
 
 // The ms may send a P-TMSI or IMSI in the mobile id.
-static void handleAttachRequest(SgsnInfo *si, L3GmmMsgAttachRequest &armsg)
-{
+static void handleAttachRequest(SgsnInfo *si, L3GmmMsgAttachRequest &armsg) {
 	switch ((AttachType) (unsigned) armsg.mAttachType) {
 	case AttachTypeGprsWhileImsiAttached:
-		SGSNLOG("NOTICE attach type "<<(int)armsg.mAttachType <<si);
+		SGSNLOG("NOTICE attach type "<<(int)armsg.mAttachType <<si)
+		;
 		// Fall through
 	case AttachTypeGprs:
 		si->mtAttachInfo.mAttachReqType = AttachTypeGprs;
@@ -687,39 +889,40 @@ static void handleAttachRequest(SgsnInfo *si, L3GmmMsgAttachRequest &armsg)
 	case AttachTypeCombined:
 		if (getNMO() != 1) {
 			// The MS should not have done this.
-			LOG(ERR)<<"Combined Attach attempt incompatible with NMO 1 "<<si;
+			LOG(ERR) << "Combined Attach attempt incompatible with NMO 1 "
+					<< si;
 		} else {
 			SGSNLOG("NOTICE attach type "<<(int)armsg.mAttachType <<si);
 		}
 		si->mtAttachInfo.mAttachReqType = AttachTypeCombined;
 		break;
 	}
-	//uint32_t newptmsi;
+//uint32_t newptmsi;
 
-	// Save info from the message:
-	si->mtAttachInfo.stashMsgInfo(armsg,true);
+// Save info from the message:
+	si->mtAttachInfo.stashMsgInfo(armsg, true);
 
-	// Re-init the state machine.
-	// If the MS does a re-attach, we may have an existing SgsnInfo from earlier, so we must reset it now:
-	// si->sgsnReset(); // 6-3-2012: changed to just freePdpAll.
+// Re-init the state machine.
+// If the MS does a re-attach, we may have an existing SgsnInfo from earlier, so we must reset it now:
+// si->sgsnReset(); // 6-3-2012: changed to just freePdpAll.
 	si->freePdpAll(true);
 
 	GmmInfo *gmm = si->getGmm();
-	// 7-1-2012: Working on multitech modem failure to reattach bug.
-	// I tried taking this out to send an extra identity request,
-	// but then the modem did not respond to that identity request,
-	// just like before it did not respond to the second attach request.
-	// Even after deleting all but that single SgsnInfo, and modifying the msid
-	// to print both tllis, and looking at pat.log the message is definitely
-	// sent on the correct TLLi.
-	// But if you tell the modem to detach and then try attach again,
-	// then the modem uses a new TLLI and sends an IMSI, so it thinks
-	// it was attached, but it is sending an attach request anyway, with a PTMSI.
-	// But the first attach used a PTMSI, and it succeeded.
-	// Things to try:  send protocol incompabible blah blah.
-	// Try converting to local tlli (0xc...); I tried that before but maybe
-	// the tlli change procedure was wrong back then.
-	// Send a detach, although I think the modem ignores this.
+// 7-1-2012: Working on multitech modem failure to reattach bug.
+// I tried taking this out to send an extra identity request,
+// but then the modem did not respond to that identity request,
+// just like before it did not respond to the second attach request.
+// Even after deleting all but that single SgsnInfo, and modifying the msid
+// to print both tllis, and looking at pat.log the message is definitely
+// sent on the correct TLLi.
+// But if you tell the modem to detach and then try attach again,
+// then the modem uses a new TLLI and sends an IMSI, so it thinks
+// it was attached, but it is sending an attach request anyway, with a PTMSI.
+// But the first attach used a PTMSI, and it succeeded.
+// Things to try:  send protocol incompabible blah blah.
+// Try converting to local tlli (0xc...); I tried that before but maybe
+// the tlli change procedure was wrong back then.
+// Send a detach, although I think the modem ignores this.
 	if (gmm) {
 		// We already have an IMSI for this MS, where the MS was identified by some TLLI
 		// associated with this SgsnInfo, which means we already did
@@ -736,57 +939,56 @@ static void handleAttachRequest(SgsnInfo *si, L3GmmMsgAttachRequest &armsg)
 		//	// Already did the identity challange; use the previously queried imsi from this ms.
 		//	imsi = si->mImsi;
 		//} else {
-			// If the MS did not send us an IMSI already, ask for one.
-			if (armsg.mMobileId.isImsi()) {
-				// The MS included the IMSI in the attach request
-				imsi = armsg.mMobileId.getImsi();
-				findGmmByImsi(imsi,si);	// Create the gmm and associate with si.
-			} else {
-				// 3GPP 24.008 11.2.2 When T3370 expires we can send another Identity Request.
-				// However we are also going to use it inverted, and send Identity Requests
-				// no closer together than T3370.
-				// If this expires, the MS will try again.
-				if (! si->mT3370ImsiRequest.active() || si->mT3370ImsiRequest.expired()) {
-					// Send off a request for the imsi.
-					L3GmmMsgIdentityRequest irmsg;
-					si->mT3370ImsiRequest.set();
-					// We only use the timer in this case, so we only set it in this case, instead
-					// of at the top of this function.
-					si->mT3310FinishAttach.set();
-					si->sgsnWriteHighSideMsg(irmsg);
-				}
-				return;
+		// If the MS did not send us an IMSI already, ask for one.
+		if (armsg.mMobileId.isImsi()) {
+			// The MS included the IMSI in the attach request
+			imsi = armsg.mMobileId.getImsi();
+			findGmmByImsi(imsi, si);	// Create the gmm and associate with si.
+		} else {
+			// 3GPP 24.008 11.2.2 When T3370 expires we can send another Identity Request.
+			// However we are also going to use it inverted, and send Identity Requests
+			// no closer together than T3370.
+			// If this expires, the MS will try again.
+			if (!si->mT3370ImsiRequest.active()
+					|| si->mT3370ImsiRequest.expired()) {
+				// Send off a request for the imsi.
+				L3GmmMsgIdentityRequest irmsg;
+				si->mT3370ImsiRequest.set();
+				// We only use the timer in this case, so we only set it in this case, instead
+				// of at the top of this function.
+				si->mT3310FinishAttach.set();
+				si->sgsnWriteHighSideMsg(irmsg);
 			}
+			return;
+		}
 		//}
 		//SgsnInfo *si2 = Sgsn::findAssignedSgsnInfoByImsi(imsi);
 		//newptmsi = si2->mMsHandle;
 	}
 #if 0
-	// We dont care if the MS already had a P-TMSI.
-	// If it is doing an attach, go ahead and assign a new one.
+// We dont care if the MS already had a P-TMSI.
+// If it is doing an attach, go ahead and assign a new one.
 	if (!si->mAllocatedTmsiTlli) {
 		si->mAllocatedTmsiTlli = Sgsn::allocateTlli();
 	}
-	// We cant set the tlli in the MS until it has received the new tlli,
-	// because we have to use the previous tlli to talk to it.
+// We cant set the tlli in the MS until it has received the new tlli,
+// because we have to use the previous tlli to talk to it.
 #endif
-	// This was for testing:
-	//L3GmmMsgIdentityRequest irmsg;
-	//si->sgsnWriteHighSideMsg(irmsg);
+// This was for testing:
+//L3GmmMsgIdentityRequest irmsg;
+//si->sgsnWriteHighSideMsg(irmsg);
 
-	// We are assigning this ptmsi to the MS.
+// We are assigning this ptmsi to the MS.
 	handleAttachStep(si);
-	//si->mT3310FinishAttach.reset();
-	//L3GmmMsgAttachAccept aa(si->attachResult(),gmm->getPTmsi(),armsg.mMobileId);
-	//si->sgsnWriteHighSideMsg(aa);
+//si->mT3310FinishAttach.reset();
+//L3GmmMsgAttachAccept aa(si->attachResult(),gmm->getPTmsi(),armsg.mMobileId);
+//si->sgsnWriteHighSideMsg(aa);
 }
 
-
-static void handleAttachComplete(SgsnInfo *si, L3GmmMsgAttachComplete &acmsg)
-{
-	// The ms is acknowledging receipt of the new tlli.
+static void handleAttachComplete(SgsnInfo *si, L3GmmMsgAttachComplete &acmsg) {
+// The ms is acknowledging receipt of the new tlli.
 	GmmInfo *gmm = si->getGmm();
-	if (! gmm) {
+	if (!gmm) {
 		// The attach complete does not match this ms state.
 		// Happens, for example, when you first turn on the bts and the ms
 		// is still trying to complete a previous attach.  Ignore it.
@@ -795,42 +997,41 @@ static void handleAttachComplete(SgsnInfo *si, L3GmmMsgAttachComplete &acmsg)
 		// Dont send a reject because we did not reject anything.
 		return;
 	}
-	//SGSNLOG("attach complete gmm="<<((uint32_t)gmm));
+//SGSNLOG("attach complete gmm="<<((uint32_t)gmm));
 	gmm->setGmmState(GmmState::GmmRegisteredNormal);
 	gmm->setAttachTime();
 #if RN_UMTS
 #else
-	// Start using the tlli associated with this imsi/ptmsi when we talk to the ms.
+// Start using the tlli associated with this imsi/ptmsi when we talk to the ms.
 	si->changeTlli(true);
 #endif
-	addShellRequest("GprsAttach",gmm);
+	addShellRequest("GprsAttach", gmm);
 
 #if 0 // nope, we are going to pass the TLLI down with each message and let GPRS deal with it.
-	//if (! Sgsn::isUmts()) {
-	//	// Update the TLLI in all the known MS structures.
-	//	// Only the SGSN knows that the MSInfo with these various TLLIs
-	//	// are in fact the same MS.  But GPRS needs to know because
-	//	// the MS will continue to use the old TLLIs, and it will botch
-	//	// up if, for example, it is in the middle of a procedure on one TLLI
-	//	// and the MS is using another TLLI, which is easy to happen given the
-	//	// extremely long lag times in message flight.
-	//	// The BSSG spec assumes there only two TLLIs, but I have seen
-	//	// the Blackberry use three simultaneously.
-	//	SgsnInfo *sip;
-	//	uint32_t newTlli = gmm->getTlli();
-	//	RN_FOR_ALL(SgsnInfoList_t,sSgsnInfoList,sip) {
-	//		if (sip->getGmm == gmm) {
-	//			UEAdapter *ms = sip->getMS();
-	//			// or should we set the ptmsi??
-	//			if (ms) ms->changeTlli(newTlli);
-	//		}
-	//	}
-	//}
+//if (! Sgsn::isUmts()) {
+//	// Update the TLLI in all the known MS structures.
+//	// Only the SGSN knows that the MSInfo with these various TLLIs
+//	// are in fact the same MS.  But GPRS needs to know because
+//	// the MS will continue to use the old TLLIs, and it will botch
+//	// up if, for example, it is in the middle of a procedure on one TLLI
+//	// and the MS is using another TLLI, which is easy to happen given the
+//	// extremely long lag times in message flight.
+//	// The BSSG spec assumes there only two TLLIs, but I have seen
+//	// the Blackberry use three simultaneously.
+//	SgsnInfo *sip;
+//	uint32_t newTlli = gmm->getTlli();
+//	RN_FOR_ALL(SgsnInfoList_t,sSgsnInfoList,sip) {
+//		if (sip->getGmm == gmm) {
+//			UEAdapter *ms = sip->getMS();
+//			// or should we set the ptmsi??
+//			if (ms) ms->changeTlli(newTlli);
+//		}
+//	}
+//}
 #endif
 }
 
-static void handleDetachRequest(SgsnInfo *si)
-{
+static void handleDetachRequest(SgsnInfo *si) {
 	L3GmmMsgDetachAccept detachAccept(0);
 	GmmInfo *gmm = si->getGmm();
 	if (!gmm) {
@@ -840,40 +1041,39 @@ static void handleDetachRequest(SgsnInfo *si)
 	}
 	si->sgsnWriteHighSideMsg(detachAccept);
 	si->sgsnReset();
-	if (gmm) addShellRequest("GprsDetach",gmm);
+	if (gmm)
+		addShellRequest("GprsDetach", gmm);
 }
 
-static void sendRAUpdateReject(SgsnInfo *si,unsigned cause)
-{
+static void sendRAUpdateReject(SgsnInfo *si, unsigned cause) {
 	L3GmmMsgRAUpdateReject raur(cause);
 	si->sgsnWriteHighSideMsg(raur);
 }
 
 // TODO:  Need to follow 4.7.13 of 24.008
-static void handleServiceRequest(SgsnInfo *si, L3GmmMsgServiceRequest &srmsg)
-{
-        GmmInfo *gmm = si->getGmm();
-	// TODO:  Should we check the PTmsi and the PDP context status??? 
-        if (!gmm) {
-	        L3GmmMsgServiceReject sr(GmmCause::Implicitly_detached);
-        	si->sgsnWriteHighSideMsg(sr);
-                return;
-        } else {
-                gmm->setActivity();
-                L3GmmMsgServiceAccept sa(si->getPdpContextStatus());
-                si->sgsnWriteHighSideMsg(sa);
-        }
-} 
+static void handleServiceRequest(SgsnInfo *si, L3GmmMsgServiceRequest &srmsg) {
+	GmmInfo *gmm = si->getGmm();
+// TODO:  Should we check the PTmsi and the PDP context status???
+	if (!gmm) {
+		L3GmmMsgServiceReject sr(GmmCause::Implicitly_detached);
+		si->sgsnWriteHighSideMsg(sr);
+		return;
+	} else {
+		gmm->setActivity();
+		L3GmmMsgServiceAccept sa(si->getPdpContextStatus());
+		si->sgsnWriteHighSideMsg(sa);
+	}
+}
 
 // 24.008 4.7.5, and I quote:
 // "The routing area updating procedure is always initiated by the MS.
 // 	It is only invoked in state GMM-REGISTERED."
 // The MS may send an mMobileId containing a P-TMSI, and it sends TmsiStatus
 // telling if it has a valid TMSI.
-static void handleRAUpdateRequest(SgsnInfo *si, L3GmmMsgRAUpdateRequest &raumsg)
-{
+static void handleRAUpdateRequest(SgsnInfo *si,
+		L3GmmMsgRAUpdateRequest &raumsg) {
 	bool sendTmsi = 0;
-	RAUpdateType updatetype = (RAUpdateType) (unsigned)raumsg.mUpdateType;
+	RAUpdateType updatetype = (RAUpdateType) (unsigned) raumsg.mUpdateType;
 	switch (updatetype) {
 	case RAUpdated:
 	case PeriodicUpdating:
@@ -883,7 +1083,7 @@ static void handleRAUpdateRequest(SgsnInfo *si, L3GmmMsgRAUpdateRequest &raumsg)
 		}
 		break;
 	case CombinedRALAUpdated:
-	case CombinedRALAWithImsiAttach:	// As of 4-29-2012, we dont even save the imsi.
+	case CombinedRALAWithImsiAttach:// As of 4-29-2012, we dont even save the imsi.
 		if (getNMO() != 1) {
 			// TODO: Should we send a reject, or an accept with a different updatetype?
 			// I think the type should have matched the NMO broadcast in the beacon,
@@ -893,20 +1093,22 @@ static void handleRAUpdateRequest(SgsnInfo *si, L3GmmMsgRAUpdateRequest &raumsg)
 			// DEBUG: Try just accepting the LAUpdate unconditionally...
 			//sendRAUpdateReject(si,GmmCause::Location_Area_not_allowed);
 			//return;
-			LOG(ERR)<<"Routing Area combined Location Area Update request incompatible with NMO 1 "<<si;
+			LOG(ERR)
+					<< "Routing Area combined Location Area Update request incompatible with NMO 1 "
+					<< si;
 		}
 		updatetype = CombinedRALAUpdated;
-		if (! raumsg.mTmsiStatus) {
+		if (!raumsg.mTmsiStatus) {
 			// We must assign a tmsi, so make one up.
 			// Just use the tlli, but lop off some bits so we can tell what it is.
 			sendTmsi = true;
 		}
 		break;
 	}
-	si->mtAttachInfo.stashMsgInfo(raumsg,false);
+	si->mtAttachInfo.stashMsgInfo(raumsg, false);
 
 	GmmInfo *gmm = si->getGmm();
-	if (! gmm) {
+	if (!gmm) {
 		// The MS has not registered with us yet, so reject the RAUpdate.
 		// Doesnt seem like this should be always needed, because we want to accept anyone.
 		// But this seems to work, and it didnt work when I didnt do this.
@@ -954,18 +1156,18 @@ static void handleRAUpdateRequest(SgsnInfo *si, L3GmmMsgRAUpdateRequest &raumsg)
 		// It was trying to register with the mobile-id set to no value.
 		// Cause 10 looks like it might be better: MS releases PDP contexts,
 		// enters GMM-DEREGISTERED.NORMAL, and forces a new attach.
-		sendRAUpdateReject(si,GmmCause::Implicitly_detached);
+		sendRAUpdateReject(si, GmmCause::Implicitly_detached);
 		return;
 	} else {
 		gmm->setActivity();
 		/** wrong
-		if (si->getState() != GmmState::GmmDeregistered) {
-			//sendRAUpdateReject(si,GmmCause::MessageNotCompatibleWithProtocolState);
-			// This is the cause that the opensgsn sends:
-			sendRAUpdateReject(si,GmmCause::MS_identity_cannot_be_derived_by_the_network);
-			return;
-		}
-		***/
+		 if (si->getState() != GmmState::GmmDeregistered) {
+		 //sendRAUpdateReject(si,GmmCause::MessageNotCompatibleWithProtocolState);
+		 // This is the cause that the opensgsn sends:
+		 sendRAUpdateReject(si,GmmCause::MS_identity_cannot_be_derived_by_the_network);
+		 return;
+		 }
+		 ***/
 
 		// The RAUpdate result is yes only if the MS has attached to us.
 		// Note that this message gets back to the originating MS guaranteed at layer2,
@@ -976,25 +1178,23 @@ static void handleRAUpdateRequest(SgsnInfo *si, L3GmmMsgRAUpdateRequest &raumsg)
 		//if (gConfig.defines("SGSN.RAUpdateIncludeTmsi") && gConfig.getNum("SGSN.RAUpdateIncludeTmsi")) {
 		//	tmsi = si->mTlli;
 		//}
-
 		//if (updatetype == CombinedRALAUpdated) {
-			// DEBUG: try this
-			// Send an authentication request to make the MS happy about this.
-			//sendAuthenticationRequest(si);
+		// DEBUG: try this
+		// Send an authentication request to make the MS happy about this.
+		//sendAuthenticationRequest(si);
 		//}
-
 		// We are not integrated with the OpenBTS stack yet,
 		// so if we need a tmsi just make one up.
 		uint32_t ptmsi = gmm->getPTmsi();
-		L3GmmMsgRAUpdateAccept raa(updatetype, si->getPdpContextStatus(),ptmsi,
-			sendTmsi ? ptmsi : 0);
+		L3GmmMsgRAUpdateAccept raa(updatetype, si->getPdpContextStatus(), ptmsi,
+				sendTmsi ? ptmsi : 0);
 		si->sgsnWriteHighSideMsg(raa);
 	}
 }
 
-static void handleRAUpdateComplete(SgsnInfo *si, L3GmmMsgRAUpdateComplete &racmsg)
-{
-	// Do not need to do anything.
+static void handleRAUpdateComplete(SgsnInfo *si,
+		L3GmmMsgRAUpdateComplete &racmsg) {
+// Do not need to do anything.
 }
 
 // This message may arrive on a DCCH channel via the GSM RR stack, rather than a GPRS message,
@@ -1016,33 +1216,30 @@ static void handleRAUpdateComplete(SgsnInfo *si, L3GmmMsgRAUpdateComplete &racms
 // and I even saw the Blackberry detach and reattach to recover.
 // In either case the MS signals resumption by sending us anything on the uplink.
 // WARNING: This runs in a different thread.
-bool Sgsn::handleGprsSuspensionRequest(uint32_t wTlli,
-	const ByteVector &wraid)	// The Routing Area id.
-{
+bool Sgsn::handleGprsSuspensionRequest(uint32_t wTlli, const ByteVector &wraid)	// The Routing Area id.
+		{
 	SGSNLOG("Received GPRS SuspensionRequest for"<<LOGHEX2("tlli",wTlli));
 	return false;	// Not handled yet.
-	// TODO:
-	// if sgsn not enabled, return false.
-	// save the channel?
-	// Send the resumption ie in the RR channel release afterward.
+// TODO:
+// if sgsn not enabled, return false.
+// save the channel?
+// Send the resumption ie in the RR channel release afterward.
 }
 
 // WARNING: This runs in a different thread.
-void Sgsn::notifyGsmActivity(const char *imsi)
-{
+void Sgsn::notifyGsmActivity(const char *imsi) {
 }
 
-static void handleL3GmmMsg(SgsnInfo *si,ByteVector &frame1)
-{
+static void handleL3GmmMsg(SgsnInfo *si, ByteVector &frame1) {
 	L3GmmFrame frame(frame1);
-	// Standard L3 header is 2 bytes:
+// Standard L3 header is 2 bytes:
 	unsigned mt = frame.getMsgType();	// message type
-	//SGSNLOG("CRACKING GMM MSG TYPE "<<mt);
+//SGSNLOG("CRACKING GMM MSG TYPE "<<mt);
 	MSUEAdapter *ms = si->getMS();
 	if (ms == NULL) {
 		// This is a serious internal error.
-		SGSNERROR("L3 message "<<L3GmmMsg::name(mt)
-			<<" for non-existent MS Info struct" <<LOGHEX2("tlli",si->mMsHandle));
+		SGSNERROR(
+				"L3 message "<<L3GmmMsg::name(mt) <<" for non-existent MS Info struct" <<LOGHEX2("tlli",si->mMsHandle));
 		return;
 	}
 	switch (mt) {
@@ -1050,7 +1247,7 @@ static void handleL3GmmMsg(SgsnInfo *si,ByteVector &frame1)
 		L3GmmMsgAttachRequest armsg;
 		armsg.gmmParse(frame);
 		SGSNLOG("Received "<<armsg.str()<<si);
-		handleAttachRequest(si,armsg);
+		handleAttachRequest(si, armsg);
 		dumpGmmInfo();
 		break;
 	}
@@ -1058,7 +1255,7 @@ static void handleL3GmmMsg(SgsnInfo *si,ByteVector &frame1)
 		L3GmmMsgAttachComplete acmsg;
 		//acmsg.gmmParse(frame);	// not needed, nothing in it.
 		SGSNLOG("Received "<<acmsg.str()<<si);
-		handleAttachComplete(si,acmsg);
+		handleAttachComplete(si, acmsg);
 		dumpGmmInfo();
 		break;
 	}
@@ -1066,7 +1263,7 @@ static void handleL3GmmMsg(SgsnInfo *si,ByteVector &frame1)
 		L3GmmMsgIdentityResponse irmsg;
 		irmsg.gmmParse(frame);
 		SGSNLOG("Received "<<irmsg.str()<<si);
-		handleIdentityResponse(si,irmsg);
+		handleIdentityResponse(si, irmsg);
 		break;
 	}
 	case L3GmmMsg::DetachRequest: {
@@ -1075,41 +1272,43 @@ static void handleL3GmmMsg(SgsnInfo *si,ByteVector &frame1)
 		break;
 	}
 	case L3GmmMsg::DetachAccept:
-		SGSNLOG("Received DetachAccept");
+		SGSNLOG("Received DetachAccept")
+		;
 		//TODO...
 		break;
 	case L3GmmMsg::RoutingAreaUpdateRequest: {
 		L3GmmMsgRAUpdateRequest raumsg;
 		raumsg.gmmParse(frame);
 		SGSNLOG("Received "<<raumsg.str()<<si);
-		handleRAUpdateRequest(si,raumsg);
+		handleRAUpdateRequest(si, raumsg);
 		break;
 	}
 	case L3GmmMsg::RoutingAreaUpdateComplete: {
 		L3GmmMsgRAUpdateComplete racmsg;
 		//racmsg.gmmParse(frame);  not needed
 		SGSNLOG("Received RAUpdateComplete "<<si);
-		handleRAUpdateComplete(si,racmsg);
+		handleRAUpdateComplete(si, racmsg);
 		break;
 	}
 	case L3GmmMsg::GMMStatus: {
 		L3GmmMsgGmmStatus stmsg;
 		stmsg.gmmParse(frame);
-		SGSNLOG("Received GMMStatus: "<<stmsg.mCause<<"=" <<GmmCause::name(stmsg.mCause)<<si);
+		SGSNLOG(
+				"Received GMMStatus: "<<stmsg.mCause<<"=" <<GmmCause::name(stmsg.mCause)<<si);
 		break;
 	}
 	case L3GmmMsg::AuthenticationAndCipheringResp: {
 		L3GmmMsgAuthenticationResponse armsg;
 		armsg.gmmParse(frame);
 		SGSNLOG("Received AuthenticationAndCipheringResp message "<<si);
-		handleAuthenticationResponse(si,armsg);
+		handleAuthenticationResponse(si, armsg);
 		break;
 	}
 	case L3GmmMsg::ServiceRequest: {
 		L3GmmMsgServiceRequest srmsg;
 		srmsg.gmmParse(frame);
 		SGSNLOG("Received ServiceRequest message" << si);
-		handleServiceRequest(si,srmsg);
+		handleServiceRequest(si, srmsg);
 		break;
 	}
 
@@ -1133,8 +1332,6 @@ static void handleL3GmmMsg(SgsnInfo *si,ByteVector &frame1)
 	}
 }
 
-
-
 // This is the old UMTS-centric entry point
 //void Sgsn::sgsnWriteLowSide(ByteVector &payload,SgsnInfo *si, unsigned rbid)
 //{
@@ -1145,27 +1342,26 @@ static void handleL3GmmMsg(SgsnInfo *si,ByteVector &frame1)
 // The handle is the URNTI and the rbid specfies the rab.
 // In gprs, the handle is the TLLI and all the rab info is encoded into the
 // payload with LLC headers so rbid is not used, which was a pretty dopey design.
-void MSUEAdapter::sgsnWriteLowSide(ByteVector &payload, uint32_t handle, unsigned rbid)
-{
-	SgsnInfo *si = sgsnGetSgsnInfoByHandle(handle,true);	// Create if necessary.
+void MSUEAdapter::sgsnWriteLowSide(ByteVector &payload, uint32_t handle,
+		unsigned rbid) {
+	SgsnInfo *si = sgsnGetSgsnInfoByHandle(handle, true);// Create if necessary.
 #if RN_UMTS
-	// No Pdcp, so just send it off.
-	si->sgsnSend2PdpLowSide(rbid, payload);
+			// No Pdcp, so just send it off.
+			si->sgsnSend2PdpLowSide(rbid, payload);
 #else
-	si->mLlcEngine->llcWriteLowSide(payload,si);
+	si->mLlcEngine->llcWriteLowSide(payload, si);
 #endif
 }
 
 #if RN_UMTS
 void MSUEAdapter::sgsnHandleL3Msg(uint32_t handle, ByteVector &msgFrame)
 {
-	SgsnInfo *si = sgsnGetSgsnInfoByHandle(handle,true);	// Create if necessary.
+	SgsnInfo *si = sgsnGetSgsnInfoByHandle(handle,true);// Create if necessary.
 	handleL3Msg(si,msgFrame);
 }
 #endif
 
-void handleL3Msg(SgsnInfo *si, ByteVector &bv)
-{
+void handleL3Msg(SgsnInfo *si, ByteVector &bv) {
 	unsigned pd = 0;
 	try {
 		L3GprsFrame frame(bv);
@@ -1173,24 +1369,25 @@ void handleL3Msg(SgsnInfo *si, ByteVector &bv)
 			//SGSNWARN("completely empty L3 uplink message "<<si);
 			return;
 		}
-		pd = frame.getNibble(0,0);	// protocol descriminator
+		pd = frame.getNibble(0, 0);	// protocol descriminator
 		switch ((GSM::L3PD) pd) {
 		case GSM::L3GPRSMobilityManagementPD: {	// Couldnt we shorten this?
-			handleL3GmmMsg(si,frame);
+			handleL3GmmMsg(si, frame);
 			break;
 		}
 		case GSM::L3GPRSSessionManagementPD: {	// Couldnt we shorten this?
-			Ggsn::handleL3SmMsg(si,frame);
+			Ggsn::handleL3SmMsg(si, frame);
 			break;
 		}
-		// TODO: Send GSM messages somewhere
+			// TODO: Send GSM messages somewhere
 		default:
-			SGSNERROR("unsupported L3 Message PD:"<<pd);
+			SGSNERROR("unsupported L3 Message PD:"<<pd)
+			;
 		}
-	} catch(SgsnError) {
+	} catch (SgsnError) {
 		return;	// Handled already
-	} catch(ByteVectorError) {	// oops!
-		SGSNERROR("internal error assembling SGSN message, pd="<<pd);	// not much to go on.
+	} catch (ByteVectorError) {	// oops!
+		SGSNERROR("internal error assembling SGSN message, pd="<<pd);// not much to go on.
 	}
 }
 
@@ -1200,38 +1397,40 @@ void handleL3Msg(SgsnInfo *si, ByteVector &bv)
 // The top bits of the TLLI encode where it came from.
 // A local TLLI has top 2 bits 11, and low 30 bits are the P-TMSI.
 // For UMTS, the handle is the invariant URNTI.
-SgsnInfo *findSgsnInfoByHandle(uint32_t handle, bool create)
-{
-	// Update: the lock is needed because the suspension request is sent by the GSM RR stack
-	// running in a separate thread.
+SgsnInfo *findSgsnInfoByHandle(uint32_t handle, bool create) {
+// Update: the lock is needed because the suspension request is sent by the GSM RR stack
+// running in a separate thread.
 	ScopedLock lock(sSgsnListMutex); // I dont think this is necessary, but be safe.
 
 	SgsnInfo *si, *result = NULL;
-	// We can delete unused SgsnInfo as soon as the attach procedure is over,
-	// which is 15s, but let them hang around a bit longer so the user can see them.
+// We can delete unused SgsnInfo as soon as the attach procedure is over,
+// which is 15s, but let them hang around a bit longer so the user can see them.
 	int idletime = gConfig.getNum("SGSN.Timer.MS.Idle");
-	time_t now; time(&now);
-	RN_FOR_ALL(SgsnInfoList_t,sSgsnInfoList,si) {
-		if (si->mMsHandle == handle) {result=si; continue;}
+	time_t now;
+	time(&now);
+	RN_FOR_ALL(SgsnInfoList_t,sSgsnInfoList,si){
+	if (si->mMsHandle == handle) {result=si; continue;}
 #if RN_UMTS
 #else
 #if NEW_TLLI_ASSIGN_PROCEDURE
-		if (si->mAltTlli == handle) {result=si;continue;}
+	if (si->mAltTlli == handle) {result=si;continue;}
 #endif
 #endif
-		// Kill off old ones, except ones that are the primary one for a gmm.
-		GmmInfo *gmm = si->getGmm();
-		if (gmm==NULL || gmm->getSI() != si) {
-			if (now - si->mLastUseTime > idletime) { si->sirm(); }
-		}
+// Kill off old ones, except ones that are the primary one for a gmm.
+	GmmInfo *gmm = si->getGmm();
+	if (gmm==NULL || gmm->getSI() != si) {
+		if (now - si->mLastUseTime > idletime) {si->sirm();}
 	}
+}
 	if (result) {
 		time(&result->mLastUseTime);
 		return result;
 	}
-	if (!create) { return NULL; }
+	if (!create) {
+		return NULL;
+	}
 
-	// Make a new one.
+// Make a new one.
 	SgsnInfo *sinew = new SgsnInfo(handle);
 	return sinew;
 }
@@ -1271,27 +1470,26 @@ SgsnInfo *findSgsnInfoByHandle(uint32_t handle, bool create)
 //}
 
 // Works, but not currently used:
-void MSUEAdapter::sgsnFreePdpAll(uint32_t mshandle)
-{
-	SgsnInfo *si = sgsnGetSgsnInfoByHandle(mshandle,false);
-	if (si) si->freePdpAll(true);
+void MSUEAdapter::sgsnFreePdpAll(uint32_t mshandle) {
+	SgsnInfo *si = sgsnGetSgsnInfoByHandle(mshandle, false);
+	if (si)
+		si->freePdpAll(true);
 }
 
 // Forces it to exist if it did not already.
-static SgsnInfo *sgsnGetSgsnInfoByHandle(uint32_t mshandle, bool create)
-{
-	// We cant cache this thing for GPRS because it changes
-	// during the TLLI assignment procedure.
-	// We could cache it for UMTS, but that assumes the lifetime of the SgsnInfo
-	// is greater than the UE, both of which are controlled by user parameters,
-	// so to be safe, we are just going to look it up every time.
-	// TODO: go back to caching it in UMTS only.
-	//if (! mSgsnInfo) {
-		//uint32_t mshandle = msGetHandle();
-		//mSgsnInfo = findSgsnInfoByHandle(mshandle,create);
-	//}
-	//return mSgsnInfo;
-	return findSgsnInfoByHandle(mshandle,create);
+static SgsnInfo *sgsnGetSgsnInfoByHandle(uint32_t mshandle, bool create) {
+// We cant cache this thing for GPRS because it changes
+// during the TLLI assignment procedure.
+// We could cache it for UMTS, but that assumes the lifetime of the SgsnInfo
+// is greater than the UE, both of which are controlled by user parameters,
+// so to be safe, we are just going to look it up every time.
+// TODO: go back to caching it in UMTS only.
+//if (! mSgsnInfo) {
+//uint32_t mshandle = msGetHandle();
+//mSgsnInfo = findSgsnInfoByHandle(mshandle,create);
+//}
+//return mSgsnInfo;
+	return findSgsnInfoByHandle(mshandle, create);
 }
 
 #if RN_UMTS
@@ -1301,67 +1499,73 @@ SgsnInfo *MSUEAdapter::sgsnGetSgsnInfo()
 	return findSgsnInfoByHandle(mshandle,false);
 }
 #else
-void MSUEAdapter::sgsnSendKeepAlive()
-{
-	// TODO
+void MSUEAdapter::sgsnSendKeepAlive() {
+// TODO
 }
 #endif
 
 #if RN_UMTS
-	// not applicable
+// not applicable
 #else
-static void parseCaps(GmmInfo *gmm)
-{
-	if (/*gmm->mGprsMultislotClass == -1 &&*/ gmm->mgAttachInfo.mMsRadioAccessCap.size()) {
+static void parseCaps(GmmInfo *gmm) {
+	if (/*gmm->mGprsMultislotClass == -1 &&*/gmm->mgAttachInfo.mMsRadioAccessCap.size()) {
 		MsRaCapability caps(gmm->mgAttachInfo.mMsRadioAccessCap);
-		gmm->mGprsMultislotClass = caps.mCList[0].getCap(AccessCapabilities::GPRSMultislotClass);
-		gmm->mGprsGeranFeaturePackI = caps.mCList[0].getCap(AccessCapabilities::GERANFeaturePackage1);
+		gmm->mGprsMultislotClass = caps.mCList[0].getCap(
+				AccessCapabilities::GPRSMultislotClass);
+		gmm->mGprsGeranFeaturePackI = caps.mCList[0].getCap(
+				AccessCapabilities::GERANFeaturePackage1);
 	}
 }
 
-
-int MSUEAdapter::sgsnGetMultislotClass(uint32_t mshandle)
-{
-	SgsnInfo *si = sgsnGetSgsnInfoByHandle(mshandle,false);
-	if (!si) { return -1; }
+int MSUEAdapter::sgsnGetMultislotClass(uint32_t mshandle) {
+	SgsnInfo *si = sgsnGetSgsnInfoByHandle(mshandle, false);
+	if (!si) {
+		return -1;
+	}
 	GmmInfo *gmm = si->getGmm();	// Must be non-null or we would not be here.
-	if (!gmm) { return -1; }		// But dont crash if I'm mistaken.
+	if (!gmm) {
+		return -1;
+	}		// But dont crash if I'm mistaken.
 	parseCaps(gmm);
 	return gmm->mGprsMultislotClass;
 }
 
-bool MSUEAdapter::sgsnGetGeranFeaturePackI(uint32_t mshandle)
-{
-	SgsnInfo *si = sgsnGetSgsnInfoByHandle(mshandle,false);
-	if (!si) { return -1; }
+bool MSUEAdapter::sgsnGetGeranFeaturePackI(uint32_t mshandle) {
+	SgsnInfo *si = sgsnGetSgsnInfoByHandle(mshandle, false);
+	if (!si) {
+		return -1;
+	}
 	GmmInfo *gmm = si->getGmm();	// Must be non-null or we would not be here.
-	if (!gmm) { return -1; }		// But dont crash if I'm mistaken.
+	if (!gmm) {
+		return -1;
+	}		// But dont crash if I'm mistaken.
 	parseCaps(gmm);
 	return gmm->mGprsGeranFeaturePackI;
 }
 #endif
 
 // If the MS is registered return the IMSI, otherwise return an empty string.
-string MSUEAdapter::sgsnFindImsiByHandle(uint32_t handle)
-{
+string MSUEAdapter::sgsnFindImsiByHandle(uint32_t handle) {
 	ScopedLock lock(sSgsnListMutex); // Will be locked again recursively in findSgsnInfoByHandle.
-	if (SgsnInfo *si = findSgsnInfoByHandle(handle,false)) {
+	if (SgsnInfo *si = findSgsnInfoByHandle(handle, false)) {
 		GmmInfo *gmm = si->getGmm();
-		if (gmm) return gmm->mImsi.hexstr();
+		if (gmm)
+			return gmm->mImsi.hexstr();
 	}
 	return string("");
 }
 
-
-GmmState::state MSUEAdapter::sgsnGetRegistrationState(uint32_t mshandle)
-{
-	SgsnInfo *si = sgsnGetSgsnInfoByHandle(mshandle,false);
-	if (!si) { return GmmState::GmmDeregistered; }
+GmmState::state MSUEAdapter::sgsnGetRegistrationState(uint32_t mshandle) {
+	SgsnInfo *si = sgsnGetSgsnInfoByHandle(mshandle, false);
+	if (!si) {
+		return GmmState::GmmDeregistered;
+	}
 	GmmInfo *gmm = si->getGmm();	// Must be non-null or we would not be here.
-	if (!gmm) { return GmmState::GmmDeregistered; }
+	if (!gmm) {
+		return GmmState::GmmDeregistered;
+	}
 	return gmm->getGmmState();
 }
-
 
 #if RN_UMTS
 void MSUEAdapter::sgsnHandleRabSetupResponse(unsigned rabId, bool success)
@@ -1388,8 +1592,7 @@ void MSUEAdapter::sgsnHandleRabSetupResponse(unsigned rabId, bool success)
 }
 #endif
 
-const char *GmmState::GmmState2Name(GmmState::state state)
-{
+const char *GmmState::GmmState2Name(GmmState::state state) {
 	switch (state) {
 	CASENAME(GmmDeregistered)
 	CASENAME(GmmRegistrationPending)
@@ -1400,32 +1603,39 @@ const char *GmmState::GmmState2Name(GmmState::state state)
 }
 
 // The alternate sgsnInfoPrint is used only for gmmDump and prints
-void sgsnInfoDump(SgsnInfo *si,std::ostream&os)
-{
-	//if (si == gmm->getSI()) {continue;}		// Already printed the main one.
+void sgsnInfoDump(SgsnInfo *si, std::ostream&os) {
+//if (si == gmm->getSI()) {continue;}		// Already printed the main one.
 	uint32_t handle = si->mMsHandle;
-	os << "SgsnInfo"<<LOGHEX(handle)
-		<<" T3370:active="<<si->mT3370ImsiRequest.active()
-		<<" remaining=" << si->mT3370ImsiRequest.remaining();
-		MSUEAdapter *ms = si->getMS();
-		if (ms) { os << ms->msid(); }
-		else { os << " MS=not_active"; }
-		AttachInfo *ati = &si->mtAttachInfo;
-		if (ati->mPrevRaId.valid()) { os << " prev:"; ati->mPrevRaId.text(os); }
-	if (!si->getGmm()) { os << " no gmm"; }
+	os << "SgsnInfo" << LOGHEX(handle) << " T3370:active="
+			<< si->mT3370ImsiRequest.active() << " remaining="
+			<< si->mT3370ImsiRequest.remaining();
+	MSUEAdapter *ms = si->getMS();
+	if (ms) {
+		os << ms->msid();
+	} else {
+		os << " MS=not_active";
+	}
+	AttachInfo *ati = &si->mtAttachInfo;
+	if (ati->mPrevRaId.valid()) {
+		os << " prev:";
+		ati->mPrevRaId.text(os);
+	}
+	if (!si->getGmm()) {
+		os << " no gmm";
+	}
 	os << endl;
 }
 
-void gmmInfoDump(GmmInfo *gmm,std::ostream&os,int options)
-{
+void gmmInfoDump(GmmInfo *gmm, std::ostream&os, int options) {
 	os << " GMM Context:";
-	os << LOGVAR2("imsi",gmm->mImsi.hexstr());
-	os << LOGHEX2("ptmsi",gmm->mPTmsi);
-	os << LOGHEX2("tlli",gmm->getTlli());
-	os << LOGVAR2("state",GmmState::GmmState2Name(gmm->getGmmState()));
-	time_t now; time(&now);
-	os << LOGVAR2("age",(gmm->mAttachTime ? now - gmm->mAttachTime : 0));
-	os << LOGVAR2("idle",now - gmm->mActivityTime);
+	os << LOGVAR2("imsi", gmm->mImsi.hexstr());
+	os << LOGHEX2("ptmsi", gmm->mPTmsi);
+	os << LOGHEX2("tlli", gmm->getTlli());
+	os << LOGVAR2("state", GmmState::GmmState2Name(gmm->getGmmState()));
+	time_t now;
+	time(&now);
+	os << LOGVAR2("age", (gmm->mAttachTime ? now - gmm->mAttachTime : 0));
+	os << LOGVAR2("idle", now - gmm->mActivityTime);
 	SgsnInfo *si = gmm->getSI();
 	if (!(options & printNoMsId)) {
 		if (si) {	// Can this be null?  No, but dont crash.
@@ -1436,8 +1646,11 @@ void gmmInfoDump(GmmInfo *gmm,std::ostream&os,int options)
 			//os << LOGVAR2("oldMNC",si->mOldMnc);
 			// The GPRS ms struct will disappear shortly after the MS stops communicating with us.
 			MSUEAdapter *ms = si->getMS();
-			if (ms) { os << ms->msid(); }
-			else { os << " MS=not_active"; }
+			if (ms) {
+				os << ms->msid();
+			} else {
+				os << " MS=not_active";
+			}
 		}
 	}
 
@@ -1448,57 +1661,59 @@ void gmmInfoDump(GmmInfo *gmm,std::ostream&os,int options)
 			// FIXME: Darn it, we need to lock the pdp contexts for this too.
 			// Go ahead and do it anyway, because collision is very low probability.
 			PdpContext *pdp = gmm->getPdp(nsapi);
-			mg_con_t *mgp;	// Temp variable reduces probability of race; the mgp itself is immortal.
-			if (pdp && (mgp=pdp->mgp)) {
+			mg_con_t *mgp;// Temp variable reduces probability of race; the mgp itself is immortal.
+			if (pdp && (mgp = pdp->mgp)) {
 				char buf[30];
-				if (pdpcnt) {os <<",";}
-				os << ip_ntoa(mgp->mg_ip,buf);
+				if (pdpcnt) {
+					os << ",";
+				}
+				os << ip_ntoa(mgp->mg_ip, buf);
 			}
 			pdpcnt++;
 		}
 	}
-	if (pdpcnt == 0) { os <<"none"; }
+	if (pdpcnt == 0) {
+		os << "none";
+	}
 	os << endl;
 
 	if (options & printDebug) {
 		// Print out all the SgsnInfos associated with this GmmInfo.
-		RN_FOR_ALL(SgsnInfoList_t,sSgsnInfoList,si) {
-			if (si->getGmm() != gmm) {continue;}
-			os <<"\t";	// this sgsn is associated with the GmmInfo just above it.
-			sgsnInfoDump(si,os);
-		}
+		RN_FOR_ALL(SgsnInfoList_t,sSgsnInfoList,si){
+		if (si->getGmm() != gmm) {continue;}
+		os <<"\t";	// this sgsn is associated with the GmmInfo just above it.
+		sgsnInfoDump(si,os);
 	}
-
-	// Now the caps:
-	if ((options & printCaps) && gmm->mgAttachInfo.mMsRadioAccessCap.size()) {
-		MsRaCapability caps(gmm->mgAttachInfo.mMsRadioAccessCap);
-		caps.text2(os,true);
-	}
-	//os << endl;	// This is extra.  There is one at the end of the caps.
 }
 
-void gmmDump(std::ostream &os)
-{
-	// The sSgsnListMutex exists for this moment: to allow this cli list routine
-	// to run from a foreign thread.
+// Now the caps:
+	if ((options & printCaps) && gmm->mgAttachInfo.mMsRadioAccessCap.size()) {
+		MsRaCapability caps(gmm->mgAttachInfo.mMsRadioAccessCap);
+		caps.text2(os, true);
+	}
+//os << endl;	// This is extra.  There is one at the end of the caps.
+}
+
+void gmmDump(std::ostream &os) {
+// The sSgsnListMutex exists for this moment: to allow this cli list routine
+// to run from a foreign thread.
 	ScopedLock lock(sSgsnListMutex);
 	int debug = sgsnDebug();
 	GmmInfo *gmm;
-	RN_FOR_ALL(GmmInfoList_t,sGmmInfoList,gmm) {
-		gmmInfoDump(gmm,os,debug ? printDebug : 0);
-		os << endl;	// This is extra.  There is one at the end of the caps.
-	}
-	// Finally, print out SgsnInfo that are not yet associated with a GmmInfo.
+	RN_FOR_ALL(GmmInfoList_t,sGmmInfoList,gmm){
+	gmmInfoDump(gmm,os,debug ? printDebug : 0);
+	os << endl;	// This is extra.  There is one at the end of the caps.
+}
+// Finally, print out SgsnInfo that are not yet associated with a GmmInfo.
 	if (debug) {
 		SgsnInfo *si;
-		RN_FOR_ALL(SgsnInfoList_t,sSgsnInfoList,si) {
-			if (! si->getGmm()) { sgsnInfoDump(si,os); }
-		}
+		RN_FOR_ALL(SgsnInfoList_t,sSgsnInfoList,si){
+		if (! si->getGmm()) {sgsnInfoDump(si,os);}
 	}
 }
+}
 
-void dumpGmmInfo()
-{
+void dumpGmmInfo() {
 	if (sgsnDebug()) {
 		std::ostringstream ss;
 		gmmDump(ss);
@@ -1506,8 +1721,7 @@ void dumpGmmInfo()
 	}
 }
 
-void SgsnInfo::setGmm(GmmInfo *gmm)
-{
+void SgsnInfo::setGmm(GmmInfo *gmm) {
 	// Copy pertinent info from the Routing Update or Attach Request message into the GmmInfo.
 	gmm->mgAttachInfo.copyFrom(mtAttachInfo);
 	this->mGmmp = gmm;
@@ -1537,16 +1751,16 @@ static void killOtherTlli(SgsnInfo *si,uint32_t newTlli)
 			// PROBLEM 2: Solved by deleting the original registered SgsnInfo (c0000001 above)
 			// and then caller will change the TLLI of the unregistred one (80000001 above.)
 			SGSNWARN("Probable repeat attach request: TLLI change procedure"<<LOGVAR(newTlli)
-				<<" for SgsnInfo:"<<si
-				<<" found existing registered SgsnInfo:"<<othersi);
+					<<" for SgsnInfo:"<<si
+					<<" found existing registered SgsnInfo:"<<othersi);
 			// I dont think any recovery is possible; sgsn is screwed up.
 		} else {
 			// We dont know or care where this old SgsnInfo came from.
 			// Destroy it with prejudice and use si, which is the
 			// SgsnInfo the MS is using to talk with us right now.
 			SGSNWARN("TLLI change procedure"<<LOGVAR(newTlli)
-				<<" for SgsnInfo:"<<si
-				<<" overwriting existing unregistered SgsnInfo:"<<othersi);
+					<<" for SgsnInfo:"<<si
+					<<" overwriting existing unregistered SgsnInfo:"<<othersi);
 			othersi->sirm();
 		}
 	}
@@ -1575,8 +1789,7 @@ static void killOtherTlli(SgsnInfo *si,uint32_t newTlli)
 // PROBLEM 2: The SgsnInfo for the new tlli will already exist.
 // ???? Solved by deleting the original registered SgsnInfo (c0000001 above)
 // ???? and then caller will change the TLLI of the unregistred one (80000001 above.)
-SgsnInfo * SgsnInfo::changeTlli(bool now)
-{
+SgsnInfo * SgsnInfo::changeTlli(bool now) {
 	GmmInfo *gmm = getGmm();
 	uint32_t newTlli = gmm->getTlli();
 #if NEW_TLLI_ASSIGN_PROCEDURE
@@ -1592,39 +1805,44 @@ SgsnInfo * SgsnInfo::changeTlli(bool now)
 	}
 	return si;
 #else
-	SgsnInfo *othersi = findSgsnInfoByHandle(newTlli,true);
+	SgsnInfo *othersi = findSgsnInfoByHandle(newTlli, true);
 	// We will use the new tlli for downlink l3 messages, eg, pdp context messages,
 	// unless they use some other SI specifically, like AttachAccept
 	// must be sent on the SI that the AttachRequest arrived on.
 	othersi->setGmm(gmm);
-	if (now) { gmm->msi = othersi; }
+	if (now) {
+		gmm->msi = othersi;
+	}
 	return othersi;
 #endif
 }
 
 // If si, forces the GmmInfo for this imsi to exist and associates it with that si.
 // If si == NULL, return NULL if gmm not found - used for CLI.
-GmmInfo *findGmmByImsi(ByteVector &imsi, SgsnInfo *si)
-{
+GmmInfo *findGmmByImsi(ByteVector &imsi, SgsnInfo *si) {
 	ScopedLock lock(sSgsnListMutex);
 	GmmInfo *gmm, *result = NULL;
 	// 24.008 11.2.2: Implicit Detach timer default is 4 min greater
 	// than T3323, which can be provided in AttachAccept, otherwise
 	// defaults to T3312, which defaults to 54 minutes.
-	int attachlimit = gConfig.getNum("SGSN.Timer.ImplicitDetach");	// expiration time in seconds.
-	time_t now; time(&now);
-	RN_FOR_ALL(GmmInfoList_t,sGmmInfoList,gmm) {
-		if (now - gmm->mActivityTime > attachlimit) {
-			GmmRemove(gmm);
-			continue;
-		}
-		if (gmm->mImsi == imsi) { result = gmm; }
+	int attachlimit = gConfig.getNum("SGSN.Timer.ImplicitDetach");// expiration time in seconds.
+	time_t now;
+	time(&now);
+	RN_FOR_ALL(GmmInfoList_t,sGmmInfoList,gmm){
+	if (now - gmm->mActivityTime > attachlimit) {
+		GmmRemove(gmm);
+		continue;
 	}
+	if (gmm->mImsi == imsi) {result = gmm;}
+}
 	if (result) {
-		if (si) si->setGmm(result);
+		if (si)
+			si->setGmm(result);
 		return result;
 	}
-	if (!si) { return NULL; }
+	if (!si) {
+		return NULL;
+	}
 
 	// Not found.  Make a new one in state Registration Pending.
 	gmm = new GmmInfo(imsi);
@@ -1632,13 +1850,13 @@ GmmInfo *findGmmByImsi(ByteVector &imsi, SgsnInfo *si)
 	si->setGmm(gmm);
 	gmm->msi = si;
 #if RN_UMTS
-		// For UMTS, the si is indexed by URNTI, which is invariant, so hook up and we are finished.
+	// For UMTS, the si is indexed by URNTI, which is invariant, so hook up and we are finished.
 #else
-		// We hook up the GMM context to the SgsnInfo corresponding to the assigned P-TMSI,
-		// even if that SgsnInfo does not exist yet,
-		// rather than the SgsnInfo corresponding to the current TLLI, which could be anything.
-		// The MS will use the SgsnInfo for the P-TMSI to talk to us after a successful attach.
-		si->changeTlli(false);
+	// We hook up the GMM context to the SgsnInfo corresponding to the assigned P-TMSI,
+	// even if that SgsnInfo does not exist yet,
+	// rather than the SgsnInfo corresponding to the current TLLI, which could be anything.
+	// The MS will use the SgsnInfo for the P-TMSI to talk to us after a successful attach.
+	si->changeTlli(false);
 //#if NEW_TLLI_ASSIGN_PROCEDURE
 //		// 3GPP 04.64 7.2.1.1 and 8.3: Perform the TLLI reassignment procedure.
 //		// Change the TLLI in the SgsnInfo the MS is currently using.
@@ -1661,29 +1879,45 @@ GmmInfo *findGmmByImsi(ByteVector &imsi, SgsnInfo *si)
 	return gmm;
 }
 
-void RabStatus::text(std::ostream &os) const
-{
-	os <<"RabStatus(mStatus=";
+void RabStatus::text(std::ostream &os) const {
+	os << "RabStatus(mStatus=";
 	switch (mStatus) {
-	case RabIdle: os << "idle"; break;
-	case RabFailure: os << "failure"; break;
-	case RabPending: os << "pending"; break;
-	case RabAllocated: os << "allocated"; break;
-	case RabDeactPending: os << "deactPending"; break;
+	case RabIdle:
+		os << "idle";
+		break;
+	case RabFailure:
+		os << "failure";
+		break;
+	case RabPending:
+		os << "pending";
+		break;
+	case RabAllocated:
+		os << "allocated";
+		break;
+	case RabDeactPending:
+		os << "deactPending";
+		break;
 	}
-	os<<LOGVAR2("mFailCode",SmCause::name(mFailCode));
-	os<<LOGVAR(mRateDownlink)<<LOGVAR(mRateUplink);
-	os<<")";
+	os << LOGVAR2("mFailCode", SmCause::name(mFailCode));
+	os << LOGVAR(mRateDownlink) << LOGVAR(mRateUplink);
+	os << ")";
 }
 
-void MSUEAdapter::sgsnPrint(uint32_t mshandle, int options, std::ostream &os)
-{
+void MSUEAdapter::sgsnPrint(uint32_t mshandle, int options, std::ostream &os) {
 	ScopedLock lock(sSgsnListMutex);		// Probably not needed.
-	SgsnInfo *si = sgsnGetSgsnInfoByHandle(mshandle,false);
-	if (!si) { os << " GMM state unknown\n"; return; }
+	SgsnInfo *si = sgsnGetSgsnInfoByHandle(mshandle, false);
+	if (!si) {
+		os << " GMM state unknown\n";
+		return;
+	}
 	GmmInfo *gmm = si->getGmm();	// Must be non-null or we would not be here.
-	if (!gmm) { os << " GMM state unknown\n"; return; }
-	gmmInfoDump(gmm,os,options);
+	if (!gmm) {
+		os << " GMM state unknown\n";
+		return;
+	}
+	gmmInfoDump(gmm, os, options);
 }
 
-}; // namespace
+}
+;
+// namespace

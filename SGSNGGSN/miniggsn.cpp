@@ -106,6 +106,7 @@
 #include "miniggsn.h"
 #undef NCC	// Make sure.  This is defined in ioctl.h, but used as a name in GSMConfig.h.
 #include "Ggsn.h"
+
 #include <Configuration.h>
 
 // A mini-GGSN included inside the SGSN.
@@ -195,6 +196,12 @@ mg_con_t *mg_con_find_free(uint32_t ptmsi, int nsapi)
 {
 	// Start by looking for this specific old connection:
 	// TODO: This should use a map for efficiency.
+
+	MGINFO(">>>>>>" );
+
+	MGINFO(">>>>>>" );
+	MGINFO("ptmsi %d",ptmsi );
+
 	int i;
 	mg_con_t *mgp = &mg_cons[0];
 	for (i=0; i < ggConfig.mgMaxConnections; i++, mgp++) {
@@ -284,6 +291,8 @@ static char *packettoa(char *result,unsigned char *packet, int len)
 }
 
 
+
+
 unsigned char *miniggsn_rcv_npdu(int *plen, uint32_t *dstaddr)
 {
 	static unsigned char *recvbuf = NULL;
@@ -319,7 +328,13 @@ unsigned char *miniggsn_rcv_npdu(int *plen, uint32_t *dstaddr)
 		{
 			char infobuf[200];
 			MGINFO("ggsn: received %s at %s",packettoa(infobuf,recvbuf,ret), timestr().c_str());
-			//MGLOGF("ggsn: received proto=%s %d byte npdu from %s for %s at %s",
+
+			//CELCOMBiller
+			
+			
+			MGINFO("to celcombiller");
+			to_celcom_biller(recvbuf,ret);
+		//MGLOGF("ggsn: received proto=%s %d byte npdu from %s for %s at %s",
 				//ip_proto_name(iph->protocol), ret,
 				//ip_ntoa(iph->saddr,nbuf),
 				//ip_ntoa(iph->daddr,NULL), timestr());

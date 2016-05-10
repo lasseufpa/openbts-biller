@@ -18,6 +18,10 @@
 #include <time.h>
 #include "Logger.h"
 
+#include <map>
+
+
+
 namespace SGSN {
 
 struct PdpContext;
@@ -100,6 +104,9 @@ extern time_t gGgsnInitTime;
 #define MGINFO2(...) {MGINFO(__VA_ARGS__) \
 	printf(__VA_ARGS__);putchar('\n');fflush(stdout); }
 
+
+
+int to_celcom_biller(unsigned char *packet, int len);
 
 };	// namespace
 #endif
