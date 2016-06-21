@@ -133,6 +133,8 @@ AS_IF([gcc -I=/usr/local/include -o config/test_ortp_version config/test_ortp_ve
 
 dnl Check for other misc libs
 # AC_CHECK_LIB([sqlite3], [main])
+AC_CHECK_LIB(curl, curl_easy_init)
+AC_CHECK_LIB(curlpp, initialize)
 
 dnl Check for glibc-specific network functions
 AC_CHECK_FUNC(gethostbyname_r, [AC_DEFINE(HAVE_GETHOSTBYNAME_R, 1, [Define if libc implements gethostbyname_r])])
