@@ -23,6 +23,7 @@
 #include "GPRSL3Messages.h"
 #include "GSMCommon.h"	// For Z100Timer - I really dont want to include the other stuff here.
 #include "miniggsn.h"
+#include "json/json.h"
 
 namespace SGSN {
 class LlcEntityGmm;
