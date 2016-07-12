@@ -37,9 +37,12 @@ using namespace Utils;
 
 //to_celcom_biller includes
 //CELCOMBiller
+<<<<<<< HEAD
 #ifndef __CURL_CURL_H
 #include <curl/curl.h>
 #endif
+=======
+>>>>>>> f6fd6998d4bc6f3ce7231521936de50ce7fed55a
 #ifndef SSTREAM
 #include <sstream>
 #endif
@@ -50,6 +53,13 @@ using namespace Utils;
 #include <netinet/ip.h>
 #endif
 
+<<<<<<< HEAD
+=======
+#include <curlpp/cURLpp.hpp>
+#include <curlpp/Easy.hpp>
+#include <curlpp/Options.hpp>
+
+>>>>>>> f6fd6998d4bc6f3ce7231521936de50ce7fed55a
 const string URL = "http://127.0.0.1:5000";
 
 namespace SGSN {
@@ -65,6 +75,7 @@ static Mutex sSgsnListMutex; // One lock sufficient for all lists maintained by 
 #define SSTR( x ) static_cast< std::ostringstream & >( \
         ( std::ostringstream() << std::dec << x ) ).str()
 
+<<<<<<< HEAD
 //CELCOMBiller
 //struct to save the return of the requests
 struct mstring {
@@ -143,6 +154,46 @@ bool has_credit(string imsi) {
 	curl_global_cleanup();
 	MGINFO("%d",s.ptr );
 	if (atof(s.ptr) > 0)
+=======
+//check if the user has credit
+bool has_credit(string imsi) {
+
+	std::list<std::string> headers;
+
+	Json::Value params;
+	Json::FastWriter fastWriter;
+
+	int value;
+
+	std::ostringstream os;
+
+	std::string fullurl = URL + "/check_data_balance";
+
+	params["imsi"] = imsi;
+
+	headers.push_back("Accept: application/json");
+	headers.push_back("Content-Type: application/json");
+	headers.push_back("charsets: utf-8");
+
+	try{
+		curlpp::Cleanup cleanup;
+		curlpp::Easy request;
+		curlpp::options::WriteStream ws(&os);
+
+		request.setOpt(new curlpp::options::PostFields(fastWriter.write(params)));
+		request.setOpt(new curlpp::options::HttpHeader(headers));
+		request.setOpt(new curlpp::options::Url(fullurl));
+		request.setOpt(ws);
+		request.perform();
+
+	}catch(...){
+		//TODO: what do we have to do when we have a error?
+		return 0;
+	}
+	std::istringstream( os.str()) >> value;
+	MGINFO("%d",value );
+	if (value > 0)
+>>>>>>> f6fd6998d4bc6f3ce7231521936de50ce7fed55a
 		return true;
 	else
 		return false;
@@ -150,6 +201,7 @@ bool has_credit(string imsi) {
 
 //CELCOMBiller
 //function to send information to celcombiller
+<<<<<<< HEAD
 int to_celcom_biller(unsigned char *packet, int len) {
 
 //inicializa variaveis para o request
@@ -163,10 +215,22 @@ int to_celcom_biller(unsigned char *packet, int len) {
 	std::string bits = SSTR(len);
 
 //format the packet
+=======
+//direction: 1 = upload, 0 = download
+int to_celcom_biller(unsigned char *packet, int len, int direction ) {
+
+	std::list<std::string> headers;
+
+	Json::Value params;
+	Json::FastWriter fastWriter;
+
+	//format the packet
+>>>>>>> f6fd6998d4bc6f3ce7231521936de50ce7fed55a
 	struct iphdr *iph = (struct iphdr*) packet;
 
 	GmmInfo *gmm;
 	std::string imsi;
+<<<<<<< HEAD
 //ScopedLock lock(sSgsnListMutex);
 	if (sGmmInfoList.empty()) { //check if the list in empty
 		return 1;
@@ -174,6 +238,18 @@ int to_celcom_biller(unsigned char *packet, int len) {
 //char buf[30];
 
 //find the imsi
+=======
+
+	char nbuf1[40], nbuf2[40];
+
+	std::string fullurl = URL + "/api/data_balance";
+	//ScopedLock lock(sSgsnListMutex);
+	if (sGmmInfoList.empty()) { //check if the list in empty
+		return 1;
+	}
+
+	//find the imsi
+>>>>>>> f6fd6998d4bc6f3ce7231521936de50ce7fed55a
 	int pdpcnt = 0;
 	MGINFO("saddr:",iph->saddr );
 	MGINFO("daddr:", iph->daddr );
@@ -181,6 +257,7 @@ int to_celcom_biller(unsigned char *packet, int len) {
 		for (unsigned nsapi = 0; nsapi < GmmInfo::sNumPdps; nsapi++) {
 			if (gmm->isNSapiActive(nsapi)) {
 				PdpContext *pdp = gmm->getPdp(nsapi);
+<<<<<<< HEAD
 				mg_con_t *mgp; // Temp variable reduces probability of race; the mgp itself is immortal.
 				if (pdp && (mgp=pdp->mgp)) {
 					//if (pdpcnt) {
@@ -190,6 +267,15 @@ int to_celcom_biller(unsigned char *packet, int len) {
 						//if the user does not have credit delet his gmm
 						// is it a better thing to do ?
 						MGINFO("IMSI: %d",imsi  );
+=======
+				mg_con_t *mgp;
+				if (pdp && (mgp=pdp->mgp)) {
+					if ( (mgp->mg_ip == iph->saddr) || (mgp->mg_ip == iph->daddr) ) {
+						imsi = gmm->mImsi.hexstr();
+						//if the user does not have credit delete his gmm
+						// is it a better thing to do ?
+						MGINFO("IMSI: %s",imsi.c_str()  );
+>>>>>>> f6fd6998d4bc6f3ce7231521936de50ce7fed55a
 						if(!has_credit(imsi)){
 							cliGmmDelete(gmm);
 							return 1;
@@ -201,6 +287,7 @@ int to_celcom_biller(unsigned char *packet, int len) {
 		}
 	}
 
+<<<<<<< HEAD
 //formata o request
 	strcpy(output, "{\"signal\":\"-\", \"type_\":\"decrease\", \"value\": \"");
 	strcat(output, bits.c_str());
@@ -240,6 +327,52 @@ int to_celcom_biller(unsigned char *packet, int len) {
 
 
 
+=======
+	//create json
+	params["user_id"]=imsi;
+	params["value"]=len;
+	params["origin"]="data use";
+
+	if (direction){
+		params["user_ip"]=ip_ntoa(iph->saddr,nbuf1);
+		params["connection_ip"]=ip_ntoa(iph->daddr,nbuf2);
+	}
+	else{
+		params["user_ip"]=ip_ntoa(iph->daddr,nbuf2);
+		params["connection_ip"]=ip_ntoa(iph->saddr,nbuf1);
+	}
+
+	MGINFO("request json: %s", fastWriter.write(params).c_str());
+
+	headers.push_back("Accept: application/json");
+	headers.push_back("Content-Type: application/json");
+	headers.push_back("charsets: utf-8");
+
+	try
+	{
+		// That's all that is needed to do cleanup of used resources (RAII style).
+		curlpp::Cleanup cleanup;
+
+		// Our request to be sent.
+		curlpp::Easy request;
+
+		request.setOpt(new curlpp::options::PostFields(fastWriter.write(params)));
+
+		request.setOpt(new curlpp::options::HttpHeader(headers));
+
+		// Set the URL.
+		request.setOpt(new curlpp::options::Url("http://127.0.0.1:5000/api/voice_balance"));
+
+		// Send request and get a result.
+		// By default the result goes to standard output.
+		request.perform();
+	}
+	catch(...){
+		//TODO: what do we have to do when we have a error?
+	}
+	return 0;
+}
+>>>>>>> f6fd6998d4bc6f3ce7231521936de50ce7fed55a
 
 static void dumpGmmInfo();
 #if RN_UMTS
