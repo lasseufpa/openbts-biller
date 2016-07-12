@@ -104,13 +104,6 @@ extern time_t gGgsnInitTime;
 #define MGINFO2(...) {MGINFO(__VA_ARGS__) \
 	printf(__VA_ARGS__);putchar('\n');fflush(stdout); }
 
-
-
-<<<<<<< HEAD
-int to_celcom_biller(unsigned char *packet, int len);
-=======
 int to_celcom_biller(unsigned char *, int, int);
->>>>>>> f6fd6998d4bc6f3ce7231521936de50ce7fed55a
-
 };	// namespace
 #endif

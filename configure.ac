@@ -132,15 +132,9 @@ AS_IF([gcc -I=/usr/local/include -o config/test_ortp_version config/test_ortp_ve
 	[AC_MSG_RESULT([< 0.22.0])])
 
 dnl Check for other misc libs
-<<<<<<< HEAD
-#AC_CHECK_LIB([sqlite3], [main])
-
-AC_CHECK_LIB(curl, curl_easy_init)
-=======
 # AC_CHECK_LIB([sqlite3], [main])
 AC_CHECK_LIB(curl, curl_easy_init)
 AC_CHECK_LIB(curlpp, initialize)
->>>>>>> f6fd6998d4bc6f3ce7231521936de50ce7fed55a
 
 dnl Check for glibc-specific network functions
 AC_CHECK_FUNC(gethostbyname_r, [AC_DEFINE(HAVE_GETHOSTBYNAME_R, 1, [Define if libc implements gethostbyname_r])])
